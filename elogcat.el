@@ -135,12 +135,8 @@ android-mode's current module and variant when available."
   :group 'elogcat
   :type '(alist :key-type string :value-type string))
 
-(defvar-local elogcat-include-filter-regexp nil)
-(defvar-local elogcat-exclude-filter-regexp nil)
 (defvar-local elogcat-min-level "V"
   "Minimum log level to display.  One of V D I W E F A.")
-
-(defconst elogcat-process-name "elogcat")
 
 (defcustom elogcat-buffer "*elogcat*"
   "Name for elogcat buffer."
@@ -256,51 +252,18 @@ android-mode's current module and variant when available."
     (elogcat--render-backlog))
   (force-mode-line-update))
 
-(defun elogcat-clear-filter (filter)
-  "Clear FILTER and redraw the retained message backlog."
-  (set filter nil)
-  (elogcat--redraw-unless-paused)
-  (message "elogcat: %s cleared" filter))
-
-(defun elogcat-clear-include-filter ()
-  "Clear the include filter."
-  (interactive)
-  (elogcat-clear-filter 'elogcat-include-filter-regexp))
-
-(defun elogcat-clear-exclude-filter ()
-  "Clear the exclude filter."
-  (interactive)
-  (elogcat-clear-filter 'elogcat-exclude-filter-regexp))
-
-(defun elogcat-set-filter (regexp filter)
-  "Set FILTER to REGEXP and redraw the retained message backlog."
-  (set filter (unless (string-empty-p regexp) regexp))
-  (elogcat--redraw-unless-paused)
-  (message "elogcat: %s set to %S" filter (symbol-value filter)))
-
 (defun elogcat-show-status ()
   "Show current Logcat state in the echo area."
   (interactive)
   (message
-   "elogcat: %s; query=%S%s; package=%S (%d processes); include=%S; exclude=%S; level=%s; %d records"
+   "elogcat: %s; query=%S%s; package=%S (%d processes); level=%s; %d records"
    (if elogcat-paused "paused" (if elogcat-follow-tail "live" "hold"))
    elogcat-query-filter (if elogcat-query-match-case " [case]" "")
    elogcat-package-filter
    (if (hash-table-p elogcat--process-table)
        (hash-table-count elogcat--process-table)
      0)
-   elogcat-include-filter-regexp elogcat-exclude-filter-regexp
    elogcat-min-level (length elogcat--records)))
-
-(defun elogcat-set-include-filter (regexp)
-  "Set the REGEXP for include filter."
-  (interactive "MRegexp Include Filter: ")
-  (elogcat-set-filter regexp 'elogcat-include-filter-regexp))
-
-(defun elogcat-set-exclude-filter (regexp)
-  "Set the REGEXP for exclude filter."
-  (interactive "MRegexp Exclude Filter: ")
-  (elogcat-set-filter regexp 'elogcat-exclude-filter-regexp))
 
 (defun elogcat-set-level (level)
   "Set minimum log LEVEL filter.
@@ -383,19 +346,14 @@ Only lines at or above this level will be displayed."
   "Return non-nil when RECORD passes current filters."
   (if (elogcat-record-system-p record)
       t
-    (let* ((text (elogcat--record-filter-text record))
-           (level (elogcat-record-level record))
+    (let* ((level (elogcat-record-level record))
            (minimum (or (cl-position elogcat-min-level elogcat-level-priority
                                      :test #'string=) 0)))
       (and (elogcat--query-matches-p record)
            (or (null level)
                (>= (or (cl-position level elogcat-level-priority
                                     :test #'string=) 0)
-                   minimum))
-           (or (null elogcat-include-filter-regexp)
-               (string-match-p elogcat-include-filter-regexp text))
-           (or (null elogcat-exclude-filter-regexp)
-               (not (string-match-p elogcat-exclude-filter-regexp text)))))))
+                   minimum))))))
 
 (defun elogcat--record-size (record)
   "Return approximate retained size of RECORD."
@@ -943,37 +901,6 @@ Only lines at or above this level will be displayed."
                           nil t)))
   (elogcat-set-query-filter query))
 
-(defmacro elogcat-define-toggle-function (sym ring-buffer-name)
-  "Define a function with SYM and RING-BUFFER-NAME."
-  (let ((fun (intern (format "elogcat-toggle-%s" sym)))
-        (doc (format "Switch to %s" ring-buffer-name)))
-    `(progn
-       (defun ,fun () ,doc
-              (interactive)
-              (let ((option (concat "-b " ,ring-buffer-name)))
-                (if (s-contains? option elogcat-logcat-command)
-                    (setq elogcat-logcat-command
-                          (mapconcat (lambda (args) (concat (s-trim args)))
-                                     (s-split option elogcat-logcat-command) " "))
-                  (setq elogcat-logcat-command
-                        (s-concat (s-trim elogcat-logcat-command) " " option))))
-              (let ((buffer-read-only nil))
-                (erase-buffer)
-                (setq elogcat--records nil
-                      elogcat--records-tail nil
-                      elogcat--unresolved-records nil
-                      elogcat--backlog-size 0
-                      elogcat-pending-output ""))
-              (elogcat-stop)
-              (elogcat)))))
-
-(elogcat-define-toggle-function main "main")
-(elogcat-define-toggle-function system "system")
-(elogcat-define-toggle-function radio "radio")
-(elogcat-define-toggle-function events "events")
-(elogcat-define-toggle-function crash "crash")
-(elogcat-define-toggle-function kernel "kernel")
-
 (transient-define-prefix elogcat-dispatch ()
   "Show commands for the current Logcat session."
   [["Stream"
@@ -1010,21 +937,30 @@ Only lines at or above this level will be displayed."
 (unless elogcat-mode-map
   (setq elogcat-mode-map (make-sparse-keymap)))
 
-(dolist (key '("c" "D" "g" "h" "l" "N" "C-c C-s" "o" "r" "s"
-               "V" "w" "M-c" "P" "C" "W" "i" "x" "I" "X" "L" "S"
-               "F" "m" "e" "k"))
-  (define-key elogcat-mode-map (kbd key) #'undefined))
-
 (--each '(("SPC" . elogcat-toggle-pause)
           ("/" . elogcat-set-query-filter)
           ("?" . elogcat-dispatch)
           ("RET" . elogcat-visit-source)
           ("TAB" . elogcat-toggle-exception-fold)
           ("<backtab>" . elogcat-toggle-all-exception-folds)
+          ("c" . elogcat-erase-buffer)
+          ("D" . elogcat-choose-device)
           ("f" . elogcat-toggle-follow-tail)
+          ("g" . elogcat-show-status)
+          ("h" . elogcat-select-filter-history)
+          ("l" . elogcat-set-level)
+          ("N" . elogcat-use-saved-filter)
+          ("C-c C-s" . elogcat-save-current-filter)
           ("n" . elogcat-next-occurrence)
+          ("o" . occur)
           ("p" . elogcat-previous-occurrence)
-          ("q" . elogcat-exit))
+          ("q" . elogcat-exit)
+          ("r" . elogcat-reconnect)
+          ("s" . elogcat-save-buffer)
+          ("V" . elogcat-select-visible-fields)
+          ("w" . elogcat-toggle-soft-wrap)
+          ("M-c" . elogcat-toggle-query-match-case)
+          ("P" . elogcat-select-mine))
   (define-key elogcat-mode-map (read-kbd-macro (car it)) (cdr it)))
 
 (define-key elogcat-mode-map [remap next-line] #'elogcat-next-occurrence)
@@ -1120,8 +1056,6 @@ Only lines at or above this level will be displayed."
     (elogcat--ensure-package-metadata
      #'elogcat--select-mine-from-metadata)))
 
-(defalias 'elogcat-toggle-package #'elogcat-select-mine)
-
 (defun elogcat-stop ()
   "Stop the adb Logcat process and package process monitor."
   (when-let* ((buffer (get-buffer elogcat-buffer)))
@@ -1143,7 +1077,7 @@ Only lines at or above this level will be displayed."
              (not (process-live-p elogcat--stream-process)))
     (setq elogcat--intentional-stop nil elogcat-stream-state 'connecting
           elogcat-stream-error nil)
-    (let* ((tail (or (bound-and-true-p elogcat--start-tail) ""))
+    (let* ((tail (or elogcat--start-tail ""))
            (arguments (append (list "shell")
                               (split-string-and-unquote elogcat-logcat-command)
                               (unless (s-contains? "-b" elogcat-logcat-command)
@@ -1177,9 +1111,8 @@ requests complete available history."
                  (funcall elogcat-project-package-function))))
          (project-root
           (with-current-buffer source-buffer
-            (or (and (fboundp 'project-current)
-                     (when-let* ((project (project-current nil)))
-                       (expand-file-name (project-root project))))
+            (or (when-let* ((project (project-current nil)))
+                  (expand-file-name (project-root project)))
                 default-directory))))
     (with-current-buffer buffer
       (when new-session (elogcat-mode))

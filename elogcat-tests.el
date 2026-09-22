@@ -12,16 +12,22 @@
 (defconst elogcat-tests--frame
   "09-18 12:34:57.001  1234  5678 E DemoTag:     at demo.Main.run(Main.kt:42)")
 
-(defconst elogcat-tests--process-query
-  (concat "__ELOGCAT_PACKAGES__\n"
-          "package:com.example.app uid:10123\n"
+(defconst elogcat-tests--packages
+  (concat "package:com.example.app uid:10123\n"
           "package:com.shared.one uid:10124\n"
-          "package:com.shared.two uid:10124\n"
-          "__ELOGCAT_PROCESSES__\n"
-          "UID PID NAME\n"
+          "package:com.shared.two uid:10124\n"))
+
+(defconst elogcat-tests--processes
+  (concat "UID PID NAME\n"
           "10123 1234 com.example.app:remote\n"
           "10124 2345 shared.process\n"
           "10124 2346 com.shared.one:worker\n"))
+
+(defun elogcat-tests--process-table ()
+  "Return process metadata parsed through the split query pipeline."
+  (let ((metadata (elogcat--parse-package-output elogcat-tests--packages)))
+    (elogcat--parse-process-output elogcat-tests--processes
+                                   (plist-get metadata :uids))))
 
 (defun elogcat-tests--query-record (&rest properties)
   "Return a structured record with PROPERTIES for query tests."
@@ -67,7 +73,7 @@
 
 (ert-deftest elogcat-process-query-maps-packages-to-running-processes ()
   "Package UIDs map main, remote, and shared-UID processes to application IDs."
-  (let* ((table (elogcat--parse-process-query elogcat-tests--process-query))
+  (let* ((table (elogcat-tests--process-table))
          (remote (gethash "1234" table))
          (ambiguous (gethash "2345" table))
          (shared (gethash "2346" table)))
@@ -96,20 +102,16 @@
           (crash (elogcat--parse-record
                   "09-18 12:34:59.000  9999  9999 A DEBUG: pid: 1234, name: app  >>> com.example.app <<<")))
      (elogcat--rebuild-package-message-cache (list system crash))
-     (setq elogcat-min-level "A"
-           elogcat-include-filter-regexp "not-present"
-           elogcat-exclude-filter-regexp ".*")
+     (setq elogcat-min-level "A")
      (should (elogcat-record-system-p system))
      (should (elogcat--record-matches-p system))
-     (setq elogcat-include-filter-regexp nil
-           elogcat-exclude-filter-regexp nil)
      (should (elogcat--record-matches-p crash)))))
 
 (ert-deftest elogcat-package-mine-uses-structured-application-id ()
   "Package mine matches application IDs exactly rather than PID or text."
   (elogcat-tests--with-buffer
    (setq elogcat--process-table
-         (elogcat--parse-process-query elogcat-tests--process-query)
+         (elogcat-tests--process-table)
          elogcat-package-filter "com.example.app"
          elogcat--query-predicate (elogcat--query-compile "package:mine"))
    (let ((record (elogcat--parse-record elogcat-tests--debug)))
@@ -120,13 +122,13 @@
      (should-not (elogcat--record-matches-p record)))))
 
 (ert-deftest elogcat-process-query-supports-android-user-names ()
-  "Legacy ps user names are normalized to package-manager numeric UIDs."
-  (let* ((output (concat "__ELOGCAT_PACKAGES__\n"
-                         "package:com.example.app uid:10123\n"
-                         "__ELOGCAT_PROCESSES__\n"
-                         "USER PID NAME\n"
-                         "u0_a123 3456 com.example.app\n"))
-         (info (gethash "3456" (elogcat--parse-process-query output))))
+  "Android ps user names are normalized to package-manager numeric UIDs."
+  (let* ((metadata (elogcat--parse-package-output
+                    "package:com.example.app uid:10123\n"))
+         (table (elogcat--parse-process-output
+                 "USER PID NAME\nu0_a123 3456 com.example.app\n"
+                 (plist-get metadata :uids)))
+         (info (gethash "3456" table)))
     (should (equal (elogcat-process-info-application-ids info)
                    '("com.example.app")))))
 
@@ -139,7 +141,7 @@
            elogcat--query-predicate (elogcat--query-compile "package:example")
            elogcat--redraw-function (lambda () (setq redrawn t)))
      (elogcat--update-process-table
-      (elogcat--parse-process-query elogcat-tests--process-query))
+      (elogcat-tests--process-table))
      (should redrawn))))
 
 (ert-deftest elogcat-process-refresh-enriches-continuations ()
@@ -150,7 +152,7 @@
                                         header)))
      (setq elogcat--records (list header frame))
      (elogcat--update-process-table
-      (elogcat--parse-process-query elogcat-tests--process-query))
+      (elogcat-tests--process-table))
      (should (equal (elogcat-record-application-ids header)
                     '("com.example.app")))
      (should (equal (elogcat-record-application-ids frame)
@@ -163,7 +165,7 @@
      (setq elogcat--records (list record))
      (should-not (elogcat-record-application-ids record))
      (elogcat--update-process-table
-      (elogcat--parse-process-query elogcat-tests--process-query))
+      (elogcat-tests--process-table))
      (should (equal (elogcat-record-application-ids record)
                     '("com.example.app"))))))
 
@@ -411,7 +413,7 @@
      (should (equal (elogcat-record-level frame) "E"))
      (should (equal (elogcat-record-tag frame) "DemoTag"))
      (setq elogcat-min-level "E"
-           elogcat-include-filter-regexp "DemoTag")
+           elogcat--query-predicate (elogcat--query-compile "tag:DemoTag"))
      (should (elogcat--record-matches-p frame))
      (setq elogcat-min-level "F")
      (should-not (elogcat--record-matches-p frame)))))
@@ -428,8 +430,7 @@
      (elogcat-set-level "E - Error"))
    (should-not (string-match-p "debug message" (buffer-string)))
    (should (string-match-p "fatal problem" (buffer-string)))
-   (let ((buffer-read-only nil))
-     (elogcat-set-filter "missing" 'elogcat-include-filter-regexp))
+   (elogcat-set-query-filter "message:missing")
    (should (string-empty-p (buffer-string)))))
 
 (ert-deftest elogcat-hold-redraw-preserves-current-record ()
@@ -478,7 +479,7 @@
    (setq elogcat-paused t)
    (let ((before (buffer-string)))
      (cl-letf (((symbol-function 'message) #'ignore))
-       (elogcat-set-filter "missing" 'elogcat-include-filter-regexp))
+       (elogcat-set-query-filter "message:missing"))
      (should (equal (buffer-string) before)))
    (cl-letf (((symbol-function 'message) #'ignore))
      (elogcat-toggle-pause))
@@ -533,27 +534,37 @@
      (should-not truncate-lines))))
 
 (ert-deftest elogcat-mode-exposes-studio-style-controls ()
-  "The mode map keeps high-frequency Logcat controls directly accessible."
+  "The mode map keeps all primary Logcat commands directly accessible."
   (dolist (binding '(("SPC" . elogcat-toggle-pause)
                      ("/" . elogcat-set-query-filter)
                      ("?" . elogcat-dispatch)
                      ("RET" . elogcat-visit-source)
                      ("TAB" . elogcat-toggle-exception-fold)
                      ("<backtab>" . elogcat-toggle-all-exception-folds)
+                     ("c" . elogcat-erase-buffer)
+                     ("D" . elogcat-choose-device)
                      ("f" . elogcat-toggle-follow-tail)
+                     ("g" . elogcat-show-status)
+                     ("h" . elogcat-select-filter-history)
+                     ("l" . elogcat-set-level)
+                     ("N" . elogcat-use-saved-filter)
+                     ("C-c C-s" . elogcat-save-current-filter)
                      ("n" . elogcat-next-occurrence)
+                     ("o" . occur)
                      ("p" . elogcat-previous-occurrence)
-                     ("q" . elogcat-exit)))
+                     ("q" . elogcat-exit)
+                     ("r" . elogcat-reconnect)
+                     ("s" . elogcat-save-buffer)
+                     ("V" . elogcat-select-visible-fields)
+                     ("w" . elogcat-toggle-soft-wrap)
+                     ("M-c" . elogcat-toggle-query-match-case)
+                     ("P" . elogcat-select-mine)))
     (should (eq (lookup-key elogcat-mode-map (kbd (car binding)))
                 (cdr binding))))
   (should (eq (lookup-key elogcat-mode-map [remap next-line])
               #'elogcat-next-occurrence))
   (should (eq (lookup-key elogcat-mode-map [remap previous-line])
-              #'elogcat-previous-occurrence))
-  (dolist (key '("c" "D" "g" "h" "l" "N" "C-c C-s" "o" "r"
-                 "s" "V" "w" "M-c" "P" "C" "W" "i" "x" "I" "X"
-                 "L" "S" "F" "m" "e" "k"))
-    (should (eq (lookup-key elogcat-mode-map (kbd key)) #'undefined))))
+              #'elogcat-previous-occurrence)))
 
 (ert-deftest elogcat-dispatch-is-transient-prefix ()
   "The mode menu entry exposes the primary Transient commands."

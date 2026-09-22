@@ -93,20 +93,6 @@
   (or (car-safe (elogcat-record-message-group record))
       (elogcat-record-message record)))
 
-(defun elogcat--record-filter-text (record)
-  "Return searchable text for RECORD, including inherited metadata."
-  (mapconcat #'identity
-             (delq nil (list (elogcat-record-raw record)
-                             (elogcat-record-timestamp record)
-                             (elogcat-record-pid record)
-                             (elogcat-record-tid record)
-                             (elogcat-record-level record)
-                             (elogcat-record-tag record)
-                             (elogcat-record-process-name record)
-                             (string-join (elogcat-record-application-ids record) " ")
-                             (elogcat-record-message record)))
-             " "))
-
 (defun elogcat--rebuild-package-message-cache (&optional records)
   "Cache Error/Fatal/Assert groups mentioning the selected package in RECORDS."
   (setq elogcat--package-message-cache (make-hash-table :test #'eq))

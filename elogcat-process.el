@@ -31,13 +31,6 @@
   "ps -A -n -o UID,PID,NAME 2>/dev/null || ps -A -o UID,PID,NAME"
   "Device command used to read running processes.")
 
-(defconst elogcat--process-query-command
-  (concat "printf '__ELOGCAT_PACKAGES__\\n'; "
-          elogcat--package-query-command "; "
-          "printf '__ELOGCAT_PROCESSES__\\n'; "
-          elogcat--process-list-command)
-  "Device shell command used to associate processes with packages.")
-
 (defun elogcat--numeric-android-uid (uid)
   "Return UID normalized from a numeric or Android uN_aM process user."
   (cond
@@ -100,17 +93,6 @@
                     :process-name process-name)
                    table))))
     table))
-
-(defun elogcat--parse-process-query (output)
-  "Return a PID table parsed from combined process metadata OUTPUT."
-  (let* ((marker "__ELOGCAT_PROCESSES__\n")
-         (position (string-search marker output))
-         (packages-output
-          (if position (substring output 0 position) ""))
-         (process-output
-          (if position (substring output (+ position (length marker))) output))
-         (metadata (elogcat--parse-package-output packages-output)))
-    (elogcat--parse-process-output process-output (plist-get metadata :uids))))
 
 (defun elogcat--apply-process-info (record &optional table)
   "Apply process metadata from TABLE to RECORD and return RECORD."

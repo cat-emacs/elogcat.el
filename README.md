@@ -97,34 +97,39 @@ You can add these lines to your init file.
 
 Key bindings
 
-The `?` menu groups the primary command set. Frequent streaming and navigation
-commands remain available directly so normal Logcat use does not require an
-extra keystroke. The menu uses Transient, which is built into current Emacs
-releases and installed as a package on older supported versions.
+The `?` menu groups the primary command set while the same commands remain
+available directly for established workflows.
 
 Key | Function
 --- | --------
 <kbd>?</kbd> | Open the Logcat command menu
 <kbd>SPC</kbd> | Pause/resume rendering while continuing to collect messages
 <kbd>/</kbd> | Set or clear an Android Studio-compatible filter query
+<kbd>l</kbd> | Select the minimum visible log level
+<kbd>P</kbd> | Select the application represented by `package:mine`
 <kbd>RET</kbd> | Open the source location referenced by a stack frame
 <kbd>TAB</kbd> / <kbd>S-TAB</kbd> | Fold one exception / toggle all exception folds
 <kbd>f</kbd> | Toggle follow-tail (`LIVE`/`HOLD`)
+<kbd>w</kbd> | Toggle soft wrapping
 <kbd>n</kbd> / <kbd>p</kbd> | Next/previous Error, Fatal, Assert, or stack frame
+<kbd>c</kbd> | Clear the device log and local backlog
+<kbd>D</kbd> | Rediscover and switch Android devices
+<kbd>r</kbd> | Reconnect the selected device immediately
+<kbd>V</kbd> | Select Raw, Compact, Process, or Full display fields
+<kbd>h</kbd> | Select a recent query
+<kbd>N</kbd> | Apply a named saved query
+<kbd>C-c C-s</kbd> | Save the current query by name
+<kbd>o</kbd> | Run `occur`
+<kbd>s</kbd> | Save the buffer and stop Logcat
+<kbd>g</kbd> | Show detailed stream and filter status
+<kbd>M-c</kbd> | Toggle case-sensitive query matching
 <kbd>q</kbd> | Stop Logcat and close the buffer
 
-The Transient menu also provides minimum level, Mine application, device,
-reconnect, display fields, query history and saved queries, soft wrapping,
-clear, occur, status, and buffer saving. Those commands remain callable through
-`M-x` but no longer occupy top-level mode keys.
+All primary commands are available both directly and from the Transient menu.
 
-Legacy include/exclude regexp commands and ring-buffer toggle commands remain
-available through `M-x`, but structured `/` queries are the primary filtering
-interface. The stream collects Android's `main`, `system`, `radio`, `events`,
-`crash`, and `kernel` ring buffers so diagnostic messages remain available to
-those queries. Ring buffers are intentionally absent from the primary keymap
-and status UI, matching modern Android Studio's app-and-query-centered
-workflow.
+The stream collects Android's `main`, `system`, `radio`, `events`, `crash`, and
+`kernel` ring buffers by default so diagnostic messages remain available to
+structured queries.
 
 ## Configuration
 
