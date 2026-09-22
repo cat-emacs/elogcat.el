@@ -69,9 +69,19 @@ Queries can be recalled with `h`, saved with `C-c C-s`, and applied by name with
 
 Stack frames are source links: move to one and press `RET` (or middle-click) to
 open the matching Kotlin or Java file under the project root at the referenced
-line. `TAB` folds the current exception's stack frames and `S-TAB` toggles all
+line. Press `R` on an exception to retrace its complete message group with the
+official R8 Retrace CLI and a selected `mapping.txt`; Retrace runs asynchronously
+and displays the result separately without modifying the original backlog.
+`TAB` folds the current exception's stack frames and `S-TAB` toggles all
 exception folds. Folding and display presets only redraw the local backlog.
 Press `V` to choose Raw, Compact, Process, or Full fields.
+
+Use `C-c C-w` (`elogcat-save-session`) to save a versioned structured JSON
+session. It preserves raw records, message-group identity, folding, query, Mine,
+visible fields, project/device metadata, and is written atomically with private
+file permissions. `C-c C-o` (`elogcat-open-session`) reopens it as an offline
+Logcat buffer without connecting to adb. The existing `s` command remains a
+plain-text snapshot and stops the live stream.
 
 ## ScreenShot
 
@@ -112,6 +122,7 @@ Key | Function
 <kbd>l</kbd> | Select the minimum visible log level
 <kbd>P</kbd> | Select the application represented by `package:mine`
 <kbd>RET</kbd> | Open the source location referenced by a stack frame
+<kbd>R</kbd> | Retrace the current exception with R8 and `mapping.txt`
 <kbd>TAB</kbd> / <kbd>S-TAB</kbd> | Fold one exception / toggle all exception folds
 <kbd>f</kbd> | Toggle follow-tail (`LIVE`/`HOLD`)
 <kbd>w</kbd> | Toggle soft wrapping
@@ -123,6 +134,7 @@ Key | Function
 <kbd>h</kbd> | Select a recent query
 <kbd>N</kbd> | Apply a named saved query
 <kbd>C-c C-s</kbd> | Save the current query by name
+<kbd>C-c C-w</kbd> / <kbd>C-c C-o</kbd> | Save/reopen a structured offline session
 <kbd>o</kbd> | Run `occur`
 <kbd>s</kbd> | Save the buffer and stop Logcat
 <kbd>g</kbd> | Show detailed stream and filter status
@@ -144,6 +156,7 @@ structured queries.
       elogcat-default-query "package:mine"   ; Android Studio default
       elogcat-default-device-serial nil       ; discover/prompt for device
       elogcat-auto-reconnect-attempts 5       ; bounded reconnect retries
+      elogcat-retrace-program nil              ; discover R8 Retrace
       elogcat-package-cache-ttl 60            ; cache package UID metadata
       elogcat-default-visible-fields '(raw)   ; or structured field list
       elogcat-project-package-function        ; string/list resolver, or nil

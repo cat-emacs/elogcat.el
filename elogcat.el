@@ -26,6 +26,7 @@
 ;; logcat interface for Emacs
 
 ;;; Code:
+(require 'json)
 (require 's)
 (require 'dash)
 (require 'cl-lib)
@@ -129,6 +130,11 @@ return one string or a list of strings.  The default uses
   :group 'elogcat
   :type 'integer)
 
+(defcustom elogcat-retrace-program nil
+  "R8 Retrace executable, or nil to discover it from PATH or Android SDK."
+  :group 'elogcat
+  :type '(choice (const :tag "Discover automatically" nil) file))
+
 (defcustom elogcat-default-visible-fields '(raw)
   "Fields shown for each record in a new Logcat buffer."
   :group 'elogcat
@@ -140,6 +146,19 @@ return one string or a list of strings.  The default uses
   "Named Android Studio-compatible filter queries."
   :group 'elogcat
   :type '(alist :key-type string :value-type string))
+
+(defconst elogcat-session-format-version 1
+  "Current version of the structured elogcat session format.")
+
+(defconst elogcat--session-visible-fields
+  '(raw timestamp pid-tid application process level tag message)
+  "Display fields accepted from a structured session file.")
+
+(defvar-local elogcat-session-file nil
+  "Structured session file last read or written by this buffer.")
+
+(defvar-local elogcat--retrace-process nil
+  "Active asynchronous R8 Retrace process for this Logcat buffer.")
 
 (defvar-local elogcat-min-level "V"
   "Minimum log level to display.  One of V D I W E F A.")
@@ -808,6 +827,86 @@ Only lines at or above this level will be displayed."
       (when (get-buffer-window (current-buffer) t)
         (recenter)))))
 
+(defun elogcat--retrace-executable ()
+  "Return the configured or discoverable R8 Retrace executable."
+  (or (and elogcat-retrace-program
+           (file-executable-p elogcat-retrace-program)
+           elogcat-retrace-program)
+      (executable-find "retrace")
+      (when-let* ((sdk (or (getenv "ANDROID_SDK_ROOT")
+                           (getenv "ANDROID_HOME")
+                           (expand-file-name "~/Library/Android/sdk")))
+                  (program (expand-file-name "cmdline-tools/latest/bin/retrace"
+                                             sdk))
+                  ((file-executable-p program)))
+        program)))
+
+(defun elogcat--record-group-lines (record)
+  "Return original log lines belonging to RECORD's message group."
+  (let ((group (elogcat-record-message-group record)))
+    (mapcar #'elogcat-record-message
+            (seq-filter (lambda (candidate)
+                          (eq (elogcat-record-message-group candidate) group))
+                        elogcat--records))))
+
+(defun elogcat--cancel-retrace ()
+  "Stop the active Retrace process and discard its output."
+  (let ((process elogcat--retrace-process))
+    (setq elogcat--retrace-process nil)
+    (when (process-live-p process)
+      (delete-process process))))
+
+(defun elogcat--retrace-sentinel (process _event)
+  "Finalize asynchronous R8 Retrace PROCESS."
+  (when (memq (process-status process) '(exit signal))
+    (let ((source (process-get process 'elogcat-source-buffer))
+          (input (process-get process 'elogcat-input-file))
+          (output (process-buffer process))
+          current)
+      (when (and input (file-exists-p input)) (delete-file input))
+      (when (buffer-live-p source)
+        (with-current-buffer source
+          (when (eq process elogcat--retrace-process)
+            (setq elogcat--retrace-process nil
+                  current t))))
+      (if current
+          (progn
+            (when (buffer-live-p output)
+              (with-current-buffer output
+                (goto-char (point-min))
+                (special-mode))
+              (display-buffer output))
+            (unless (zerop (process-exit-status process))
+              (message "elogcat: Retrace failed with status %d"
+                       (process-exit-status process))))
+        (when (buffer-live-p output) (kill-buffer output))))))
+
+(defun elogcat-retrace-exception (mapping-file)
+  "Retrace the exception group at point using R8 MAPPING-FILE asynchronously."
+  (interactive "fR8 mapping file: ")
+  (let* ((record (elogcat--record-at-position (point)))
+         (lines (and record (elogcat--record-group-lines record)))
+         (program (elogcat--retrace-executable)))
+    (unless lines (user-error "No Logcat exception group at point"))
+    (unless program
+      (user-error "R8 Retrace not found; customize elogcat-retrace-program"))
+    (elogcat--cancel-retrace)
+    (let ((input (make-temp-file "elogcat-retrace-" nil ".txt"))
+          (output (generate-new-buffer "*elogcat retrace*")))
+      (with-temp-file input
+        (insert (string-join lines "\n") "\n"))
+      (with-current-buffer output
+        (let ((inhibit-read-only t)) (erase-buffer)))
+      (setq elogcat--retrace-process
+            (make-process
+             :name "elogcat-retrace" :buffer output :stderr output :noquery t
+             :command (list program (expand-file-name mapping-file) input)
+             :sentinel #'elogcat--retrace-sentinel))
+      (process-put elogcat--retrace-process 'elogcat-source-buffer
+                   (current-buffer))
+      (process-put elogcat--retrace-process 'elogcat-input-file input)
+      (message "elogcat: retracing exception…"))))
+
 (defun elogcat-visit-source ()
   "Visit the source location referenced by the stack frame at point."
   (interactive)
@@ -934,9 +1033,12 @@ Only lines at or above this level will be displayed."
     ("n" "Next occurrence" elogcat-next-occurrence :transient t)
     ("p" "Previous occurrence" elogcat-previous-occurrence :transient t)
     ("RET" "Visit source" elogcat-visit-source)
+    ("R" "Retrace exception" elogcat-retrace-exception)
     ("D" "Select device" elogcat-choose-device)
     ("g" "Show status" elogcat-show-status :transient t)
-    ("s" "Save buffer" elogcat-save-buffer)
+    ("x" "Save session" elogcat-save-session)
+    ("O" "Open session" elogcat-open-session)
+    ("s" "Save plain text" elogcat-save-buffer)
     ("q" "Quit Logcat" elogcat-exit)]])
 
 (defvar elogcat-mode-map nil
@@ -964,7 +1066,10 @@ Only lines at or above this level will be displayed."
           ("p" . elogcat-previous-occurrence)
           ("q" . elogcat-exit)
           ("r" . elogcat-reconnect)
+          ("R" . elogcat-retrace-exception)
           ("s" . elogcat-save-buffer)
+          ("C-c C-w" . elogcat-save-session)
+          ("C-c C-o" . elogcat-open-session)
           ("V" . elogcat-select-visible-fields)
           ("w" . elogcat-toggle-soft-wrap)
           ("M-c" . elogcat-toggle-query-match-case)
@@ -994,6 +1099,7 @@ Only lines at or above this level will be displayed."
               elogcat-device-serial elogcat-default-device-serial
               elogcat-stream-state 'stopped)
   (add-hook 'kill-buffer-hook #'elogcat--stop-process-monitor nil t)
+  (add-hook 'kill-buffer-hook #'elogcat--cancel-retrace nil t)
   (buffer-disable-undo))
 
 (defun elogcat-exit ()
@@ -1156,8 +1262,240 @@ requests complete available history."
     (switch-to-buffer buffer)
     (goto-char (point-max))))
 
+(defun elogcat--session-records ()
+  "Return JSON-ready records preserving message-group identity."
+  (let ((groups (make-hash-table :test #'eq))
+        (next-group 0)
+        records)
+    (dolist (record elogcat--records (nreverse records))
+      (let* ((group (elogcat-record-message-group record))
+             (group-id (or (gethash group groups)
+                           (puthash group (cl-incf next-group) groups))))
+        (push `((raw . ,(elogcat-record-raw record))
+                (level . ,(elogcat-record-level record))
+                (timestamp . ,(elogcat-record-timestamp record))
+                (pid . ,(elogcat-record-pid record))
+                (tid . ,(elogcat-record-tid record))
+                (tag . ,(elogcat-record-tag record))
+                (message . ,(elogcat-record-message record))
+                (applicationIds . ,(elogcat-record-application-ids record))
+                (processName . ,(elogcat-record-process-name record))
+                (messageGroup . ,group-id)
+                (collapsed . ,(and (hash-table-p elogcat--collapsed-groups)
+                                   (gethash group elogcat--collapsed-groups)))
+                (system . ,(elogcat-record-system-p record)))
+              records)))))
+
+(defun elogcat--session-data ()
+  "Return the current Logcat session as JSON-ready data."
+  `((format . "elogcat-session")
+    (version . ,elogcat-session-format-version)
+    (projectRoot . ,elogcat-project-root)
+    (deviceSerial . ,elogcat-device-serial)
+    (deviceName . ,elogcat-device-name)
+    (query . ,elogcat-query-filter)
+    (queryMatchCase . ,elogcat-query-match-case)
+    (minimumLevel . ,elogcat-min-level)
+    (visibleFields . ,(mapcar #'symbol-name elogcat-visible-fields))
+    (mine . ,elogcat-package-filter)
+    (records . ,(elogcat--session-records))))
+
+(defun elogcat--json-value (object key)
+  "Return KEY from JSON alist OBJECT."
+  (alist-get key object))
+
+(defun elogcat--session-visible-field (value)
+  "Return whitelisted display field for JSON VALUE, or nil."
+  (seq-find (lambda (field) (equal value (symbol-name field)))
+            elogcat--session-visible-fields))
+
+(defun elogcat--json-null-to-nil (value)
+  "Return nil for the structured-session JSON null sentinel VALUE."
+  (unless (eq value :elogcat-json-null) value))
+
+(defun elogcat--json-optional-string-field-p (object key)
+  "Return non-nil when OBJECT's KEY is absent, null, or a string."
+  (let ((cell (assq key object)))
+    (or (null cell)
+        (eq (cdr cell) :elogcat-json-null)
+        (stringp (cdr cell)))))
+
+(defun elogcat--session-record-valid-p (item)
+  "Return non-nil when JSON record ITEM has the required safe shape."
+  (and (listp item)
+       (stringp (elogcat--json-value item 'raw))
+       (stringp (elogcat--json-value item 'message))
+       (numberp (elogcat--json-value item 'messageGroup))
+       (seq-every-p
+        (lambda (key) (elogcat--json-optional-string-field-p item key))
+        '(level timestamp pid tid tag processName))
+       (memq (elogcat--json-value item 'collapsed)
+             '(nil t :elogcat-json-null :elogcat-json-false))
+       (memq (elogcat--json-value item 'system)
+             '(nil t :elogcat-json-null :elogcat-json-false))
+       (let ((ids (elogcat--json-value item 'applicationIds)))
+         (or (eq ids :elogcat-json-null)
+             (and (vectorp ids) (seq-every-p #'stringp ids))))))
+
+(defun elogcat--restore-session-records (items)
+  "Restore structured Logcat records from JSON ITEMS."
+  (let ((groups (make-hash-table :test #'eql))
+        (collapsed (make-hash-table :test #'eq))
+        records)
+    (dolist (item items)
+      (let* ((group-id (elogcat--json-value item 'messageGroup))
+             (group (or (gethash group-id groups)
+                        (puthash group-id
+                                 (elogcat--new-message-group "") groups)))
+             (record
+              (make-elogcat-record
+               :raw (elogcat--json-value item 'raw)
+               :level (elogcat--json-null-to-nil
+                       (elogcat--json-value item 'level))
+               :timestamp (elogcat--json-null-to-nil
+                           (elogcat--json-value item 'timestamp))
+               :pid (elogcat--json-null-to-nil
+                     (elogcat--json-value item 'pid))
+               :tid (elogcat--json-null-to-nil
+                     (elogcat--json-value item 'tid))
+               :tag (elogcat--json-null-to-nil
+                     (elogcat--json-value item 'tag))
+               :message (elogcat--json-value item 'message)
+               :application-ids
+               (let ((ids (elogcat--json-value item 'applicationIds)))
+                 (and (vectorp ids) (append ids nil)))
+               :process-name
+               (elogcat--json-null-to-nil
+                (elogcat--json-value item 'processName))
+               :message-group group
+               :system-p (eq (elogcat--json-value item 'system) t))))
+        (if (string-empty-p (car group))
+            (setcar group (elogcat-record-message record))
+          (elogcat--extend-message-group group (elogcat-record-message record)))
+        (when (eq (elogcat--json-value item 'collapsed) t)
+          (puthash group t collapsed))
+        (push record records)))
+    (setq elogcat--collapsed-groups collapsed)
+    (nreverse records)))
+
+(defun elogcat-save-session (file)
+  "Save the structured Logcat session to FILE without stopping the stream."
+  (interactive
+   (list (read-file-name "Save Logcat session: " nil elogcat-session-file nil
+                         "elogcat-session.json")))
+  (let* ((file (expand-file-name file))
+         (directory (file-name-directory file))
+         (data (elogcat--session-data))
+         (temporary (make-temp-file (expand-file-name ".elogcat-" directory))))
+    (unwind-protect
+        (progn
+          (set-file-modes temporary #o600)
+          (let ((coding-system-for-write 'utf-8-unix))
+            (with-temp-file temporary
+              (insert (json-encode data))
+              (insert "\n")))
+          (rename-file temporary file t)
+          (setq temporary nil elogcat-session-file file)
+          (message "elogcat: saved structured session to %s" file))
+      (when (and temporary (file-exists-p temporary))
+        (delete-file temporary)))))
+
+;;;###autoload
+(defun elogcat-open-session (file)
+  "Open structured Logcat session FILE in an offline buffer."
+  (interactive "fOpen Logcat session: ")
+  (let* ((file (expand-file-name file))
+         (json-object-type 'alist)
+         (json-array-type 'vector)
+         (json-key-type 'symbol)
+         (json-null :elogcat-json-null)
+         (json-false :elogcat-json-false)
+         (data (json-read-file file)))
+    (unless (and (equal (elogcat--json-value data 'format) "elogcat-session")
+                 (equal (elogcat--json-value data 'version)
+                        elogcat-session-format-version))
+      (user-error "Unsupported elogcat session format"))
+    (let* ((project-root
+            (elogcat--json-null-to-nil
+             (elogcat--json-value data 'projectRoot)))
+           (device-serial
+            (elogcat--json-null-to-nil
+             (elogcat--json-value data 'deviceSerial)))
+           (device-name
+            (elogcat--json-null-to-nil
+             (elogcat--json-value data 'deviceName)))
+           (query
+            (elogcat--json-null-to-nil
+             (elogcat--json-value data 'query)))
+           (query-match-case-value
+            (elogcat--json-value data 'queryMatchCase))
+           (query-match-case (eq query-match-case-value t))
+           (minimum-level-value
+            (elogcat--json-value data 'minimumLevel))
+           (minimum-level (if (member minimum-level-value
+                                      elogcat-level-priority)
+                              minimum-level-value "V"))
+           (visible-value (elogcat--json-value data 'visibleFields))
+           (visible-values (and (vectorp visible-value)
+                                (append visible-value nil)))
+           (visible-fields
+            (and visible-values
+                 (mapcar #'elogcat--session-visible-field visible-values)))
+           (mine-value (elogcat--json-value data 'mine))
+           (mine (and (vectorp mine-value) (append mine-value nil)))
+           (record-value (elogcat--json-value data 'records))
+           (record-items
+            (and (vectorp record-value) (append record-value nil)))
+           (buffer (generate-new-buffer
+                    (format "*elogcat:%s*" (file-name-base file)))))
+      (unless (and (elogcat--json-optional-string-field-p data 'projectRoot)
+                   (elogcat--json-optional-string-field-p data 'deviceSerial)
+                   (elogcat--json-optional-string-field-p data 'deviceName)
+                   (elogcat--json-optional-string-field-p data 'query)
+                   (memq query-match-case-value
+                         '(nil t :elogcat-json-null :elogcat-json-false))
+                   (or (memq minimum-level-value '(nil :elogcat-json-null))
+                       (member minimum-level-value elogcat-level-priority))
+                   (vectorp visible-value)
+                   visible-fields
+                   (not (memq nil visible-fields))
+                   (or (eq mine-value :elogcat-json-null)
+                       (and (vectorp mine-value)
+                            (seq-every-p #'stringp mine)))
+                   (or (eq record-value :elogcat-json-null)
+                       (vectorp record-value))
+                   (seq-every-p #'elogcat--session-record-valid-p record-items))
+        (kill-buffer buffer)
+        (user-error "Malformed elogcat session data"))
+      (with-current-buffer buffer
+        (elogcat-mode)
+        (let ((records (elogcat--restore-session-records record-items)))
+          (setq elogcat-session-file file
+                elogcat-project-root project-root
+                elogcat-device-serial device-serial
+                elogcat-device-name device-name
+                elogcat-query-filter query
+                elogcat-query-match-case query-match-case
+                elogcat-min-level minimum-level
+                elogcat-visible-fields visible-fields
+                elogcat-package-filter mine
+                elogcat--mine-auto-p nil
+                elogcat-stream-state 'offline
+                elogcat--records records
+                elogcat--records-tail (last records)
+                elogcat--backlog-size
+                (seq-reduce (lambda (size record)
+                              (+ size (length (elogcat-record-raw record)) 1))
+                            records 0)
+                elogcat--query-predicate
+                (and query (elogcat--query-compile query))))
+        (elogcat--rebuild-package-message-cache)
+        (elogcat--render-backlog t))
+      (switch-to-buffer buffer)
+      buffer)))
+
 (defun elogcat-save-buffer ()
-  "Save the current elogcat buffer to a file and stop the logcat process."
+  "Save the rendered buffer as plain text and stop the Logcat process."
   (interactive)
   (save-buffer)
   (elogcat-stop))

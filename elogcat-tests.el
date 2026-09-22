@@ -71,6 +71,144 @@
        (when-let* ((buffer (get-buffer elogcat-buffer)))
          (kill-buffer buffer)))))
 
+(ert-deftest elogcat-retrace-uses-current-message-group-asynchronously ()
+  "Retrace sends only the current exception group to the configured CLI."
+  (elogcat-tests--with-buffer
+   (let* ((header (elogcat--parse-record elogcat-tests--error))
+          (frame (elogcat--parse-record "    at a.a(A.java:1)" header))
+          (other (elogcat--parse-record elogcat-tests--debug))
+          command input sentinel process)
+     (setq elogcat--records (list header frame other))
+     (let ((buffer-read-only nil))
+       (elogcat--insert-records elogcat--records))
+     (goto-char (point-min))
+     (cl-letf (((symbol-function 'elogcat--retrace-executable)
+                (lambda () "/tmp/retrace"))
+               ((symbol-function 'make-process)
+                (lambda (&rest args)
+                  (setq command (plist-get args :command)
+                        sentinel (plist-get args :sentinel))
+                  'fake-process))
+               ((symbol-function 'process-put)
+                (lambda (_process property value)
+                  (when (eq property 'elogcat-input-file)
+                    (setq input value))))
+               ((symbol-function 'process-live-p) (lambda (_process) nil)))
+       (elogcat-retrace-exception "/tmp/mapping.txt"))
+     (setq process elogcat--retrace-process)
+     (unwind-protect
+         (progn
+           (should (eq process 'fake-process))
+           (should (eq sentinel #'elogcat--retrace-sentinel))
+           (should (equal (seq-take command 2)
+                          '("/tmp/retrace" "/tmp/mapping.txt")))
+           (should (equal (with-temp-buffer
+                            (insert-file-contents input)
+                            (buffer-string))
+                          "fatal problem\n    at a.a(A.java:1)\n")))
+       (when (and input (file-exists-p input)) (delete-file input))))))
+
+(ert-deftest elogcat-stale-retrace-result-is-discarded ()
+  "A superseded Retrace process cannot display stale output."
+  (let ((source (generate-new-buffer " *elogcat-retrace-source*"))
+        (output (generate-new-buffer " *elogcat-retrace-output*"))
+        (input (make-temp-file "elogcat-retrace-")))
+    (unwind-protect
+        (with-current-buffer source
+          (elogcat-mode)
+          (setq elogcat--retrace-process 'new-process)
+          (cl-letf (((symbol-function 'process-status) (lambda (_p) 'exit))
+                    ((symbol-function 'process-exit-status) (lambda (_p) 0))
+                    ((symbol-function 'process-get)
+                     (lambda (_p property)
+                       (pcase property
+                         ('elogcat-source-buffer source)
+                         ('elogcat-input-file input))))
+                    ((symbol-function 'process-buffer) (lambda (_p) output))
+                    ((symbol-function 'display-buffer)
+                     (lambda (&rest _) (ert-fail "displayed stale retrace"))))
+            (elogcat--retrace-sentinel 'old-process "finished"))
+          (should-not (buffer-live-p output))
+          (should (eq elogcat--retrace-process 'new-process))
+          (should-not (file-exists-p input)))
+      (when (buffer-live-p source) (kill-buffer source))
+      (when (buffer-live-p output) (kill-buffer output))
+      (when (file-exists-p input) (delete-file input)))))
+
+(ert-deftest elogcat-structured-session-round-trip ()
+  "Structured sessions preserve records, groups, view state, and folding."
+  (let ((file (make-temp-file "elogcat-session-" nil ".json"))
+        opened)
+    (unwind-protect
+        (elogcat-tests--with-buffer
+         (let* ((header (elogcat--parse-record elogcat-tests--error))
+                (frame (elogcat--parse-record
+                        "    at demo.Main.run(Main.kt:42)" header)))
+           (setq elogcat--records (list header frame)
+                 elogcat--records-tail (last elogcat--records)
+                 elogcat--backlog-size
+                 (+ (length elogcat-tests--error)
+                    (length elogcat-tests--frame) 2)
+                 elogcat-query-filter "level:error"
+                 elogcat--query-predicate
+                 (elogcat--query-compile elogcat-query-filter)
+                 elogcat-query-match-case t
+                 elogcat-min-level "D"
+                 elogcat-visible-fields '(timestamp level tag message)
+                 elogcat-package-filter '("com.example.app")
+                 elogcat-project-root "/tmp/project/"
+                 elogcat-device-serial "emulator-5554")
+           (puthash (elogcat-record-message-group header) t
+                    elogcat--collapsed-groups)
+           (elogcat-save-session file)
+           (should (= (logand (file-modes file) #o777) #o600))
+           (save-window-excursion
+             (setq opened (elogcat-open-session file)))
+           (with-current-buffer opened
+             (should (eq elogcat-stream-state 'offline))
+             (should (equal elogcat-query-filter "level:error"))
+             (should elogcat-query-match-case)
+             (should (equal elogcat-visible-fields
+                            '(timestamp level tag message)))
+             (should (equal elogcat-package-filter '("com.example.app")))
+             (should (= (length elogcat--records) 2))
+             (should (eq (elogcat-record-message-group (car elogcat--records))
+                         (elogcat-record-message-group (cadr elogcat--records))))
+             (should (gethash (elogcat-record-message-group
+                               (car elogcat--records))
+                              elogcat--collapsed-groups)))))
+      (when (buffer-live-p opened) (kill-buffer opened))
+      (when (file-exists-p file) (delete-file file)))))
+
+(ert-deftest elogcat-rejects-malformed-session-fields ()
+  "Structured session fields are validated before creating a buffer."
+  (dolist (fields '("\"visibleFields\":[\"arbitrary-symbol\"]"
+                    "\"query\":[\"not-a-string\"],\"visibleFields\":[\"raw\"]"
+                    "\"projectRoot\":42,\"visibleFields\":[\"raw\"]"
+                    "\"deviceSerial\":{},\"visibleFields\":[\"raw\"]"
+                    "\"queryMatchCase\":[],\"visibleFields\":[\"raw\"]"))
+    (let* ((file (make-temp-file "elogcat-session-" nil ".json"))
+           (buffer-name (format "*elogcat:%s*" (file-name-base file))))
+      (unwind-protect
+          (progn
+            (with-temp-file file
+              (insert (format
+                       "{\"format\":\"elogcat-session\",\"version\":1,%s,\"mine\":null,\"records\":[]}"
+                       fields)))
+            (should-error (elogcat-open-session file) :type 'user-error)
+            (should-not (get-buffer buffer-name)))
+        (delete-file file)))))
+
+(ert-deftest elogcat-rejects-unknown-session-version ()
+  "Opening an unknown structured session version fails safely."
+  (let ((file (make-temp-file "elogcat-session-" nil ".json")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "{\"format\":\"elogcat-session\",\"version\":999}"))
+          (should-error (elogcat-open-session file) :type 'user-error))
+      (delete-file file))))
+
 (ert-deftest elogcat-process-query-maps-packages-to-running-processes ()
   "Package UIDs map main, remote, and shared-UID processes to application IDs."
   (let* ((table (elogcat-tests--process-table))
