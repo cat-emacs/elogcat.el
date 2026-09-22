@@ -12,6 +12,16 @@
 (defconst elogcat-tests--frame
   "09-18 12:34:57.001  1234  5678 E DemoTag:     at demo.Main.run(Main.kt:42)")
 
+(defconst elogcat-tests--process-query
+  (concat "__ELOGCAT_PACKAGES__\n"
+          "package:com.example.app uid:10123\n"
+          "package:com.shared.one uid:10124\n"
+          "package:com.shared.two uid:10124\n"
+          "__ELOGCAT_PROCESSES__\n"
+          "UID PID NAME\n"
+          "10123 1234 com.example.app:remote\n"
+          "10124 2345 shared.process\n"))
+
 (defmacro elogcat-tests--with-buffer (&rest body)
   "Evaluate BODY in an isolated Logcat buffer."
   `(let ((elogcat-buffer (generate-new-buffer-name " *elogcat-test*")))
@@ -22,6 +32,122 @@
            ,@body)
        (when-let* ((buffer (get-buffer elogcat-buffer)))
          (kill-buffer buffer)))))
+
+(ert-deftest elogcat-process-query-maps-packages-to-running-processes ()
+  "Package UIDs map main, remote, and shared-UID processes to application IDs."
+  (let* ((table (elogcat--parse-process-query elogcat-tests--process-query))
+         (remote (gethash "1234" table))
+         (shared (gethash "2345" table)))
+    (should (equal (elogcat-process-info-process-name remote)
+                   "com.example.app:remote"))
+    (should (equal (elogcat-process-info-application-ids remote)
+                   '("com.example.app")))
+    (should (equal (sort (copy-sequence
+                          (elogcat-process-info-application-ids shared))
+                         #'string<)
+                   '("com.shared.one" "com.shared.two")))))
+
+(ert-deftest elogcat-package-filter-keeps-system-and-assert-crash-messages ()
+  "System markers and Assert proxy crashes survive package filtering."
+  (elogcat-tests--with-buffer
+   (setq elogcat-package-filter "com.example.app")
+   (let* ((system (elogcat--parse-record "--------- beginning of main"))
+          (crash (elogcat--parse-record
+                  "09-18 12:34:59.000  9999  9999 A DEBUG: pid: 1234, name: app  >>> com.example.app <<<")))
+     (elogcat--rebuild-package-message-cache (list system crash))
+     (setq elogcat-min-level "A"
+           elogcat-include-filter-regexp "not-present"
+           elogcat-exclude-filter-regexp ".*")
+     (should (elogcat-record-system-p system))
+     (should (elogcat--record-matches-p system))
+     (setq elogcat-include-filter-regexp nil
+           elogcat-exclude-filter-regexp nil)
+     (should (elogcat--record-matches-p crash)))))
+
+(ert-deftest elogcat-package-filter-uses-structured-application-id ()
+  "Package filtering matches application IDs exactly rather than PID or text."
+  (elogcat-tests--with-buffer
+   (setq elogcat--process-table
+         (elogcat--parse-process-query elogcat-tests--process-query)
+         elogcat-package-filter "com.example.app")
+   (let ((record (elogcat--parse-record elogcat-tests--debug)))
+     (should (equal (elogcat-record-application-ids record)
+                    '("com.example.app")))
+     (should (elogcat--record-matches-p record))
+     (setq elogcat-package-filter "com.example")
+     (should-not (elogcat--record-matches-p record)))))
+
+(ert-deftest elogcat-process-query-supports-android-user-names ()
+  "Legacy ps user names are normalized to package-manager numeric UIDs."
+  (let* ((output (concat "__ELOGCAT_PACKAGES__\n"
+                         "package:com.example.app uid:10123\n"
+                         "__ELOGCAT_PROCESSES__\n"
+                         "USER PID NAME\n"
+                         "u0_a123 3456 com.example.app\n"))
+         (info (gethash "3456" (elogcat--parse-process-query output))))
+    (should (equal (elogcat-process-info-application-ids info)
+                   '("com.example.app")))))
+
+(ert-deftest elogcat-process-refresh-enriches-continuations ()
+  "A delayed process mapping enriches headers and their continuation lines."
+  (elogcat-tests--with-buffer
+   (let* ((header (elogcat--parse-record elogcat-tests--error))
+          (frame (elogcat--parse-record "    at demo.Main.run(Main.kt:42)"
+                                        header)))
+     (setq elogcat--records (list header frame))
+     (elogcat--update-process-table
+      (elogcat--parse-process-query elogcat-tests--process-query))
+     (should (equal (elogcat-record-application-ids header)
+                    '("com.example.app")))
+     (should (equal (elogcat-record-application-ids frame)
+                    '("com.example.app"))))))
+
+(ert-deftest elogcat-process-refresh-enriches-retained-records ()
+  "A new PID mapping updates retained records after an application restart."
+  (elogcat-tests--with-buffer
+   (let ((record (elogcat--parse-record elogcat-tests--debug)))
+     (setq elogcat--records (list record))
+     (should-not (elogcat-record-application-ids record))
+     (elogcat--update-process-table
+      (elogcat--parse-process-query elogcat-tests--process-query))
+     (should (equal (elogcat-record-application-ids record)
+                    '("com.example.app"))))))
+
+(ert-deftest elogcat-package-filter-keeps-proxy-crash-message ()
+  "Error groups mentioning a package survive proxy-process filtering."
+  (elogcat-tests--with-buffer
+   (setq elogcat-package-filter "com.example.app")
+   (let* ((header (elogcat--parse-record
+                   "09-18 12:34:58.000  9999  9999 E AndroidRuntime: FATAL EXCEPTION: main"))
+          (process (elogcat--parse-record
+                    "09-18 12:34:58.000  9999  9999 E AndroidRuntime: Process: com.example.app, PID: 1234"
+                    header)))
+     (elogcat--rebuild-package-message-cache (list header process))
+     (should (eq (elogcat-record-message-group header)
+                 (elogcat-record-message-group process)))
+     (should (elogcat--record-matches-p header))
+     (should (elogcat--record-matches-p process)))))
+
+(ert-deftest elogcat-package-toggle-does-not-restart-or-clear ()
+  "Changing package filters preserves the Logcat process and backlog."
+  (elogcat-tests--with-buffer
+   (let ((record (elogcat--parse-record elogcat-tests--debug))
+         refreshed)
+     (setq elogcat--records (list record))
+     (cl-letf (((symbol-function 'elogcat--refresh-process-table)
+                (lambda () (setq refreshed t)))
+               ((symbol-function 'elogcat--start-process-monitor)
+                (lambda () (ert-fail "package toggle restarted monitor")))
+               ((symbol-function 'elogcat--stop-process-monitor)
+                (lambda () (ert-fail "package toggle stopped monitor")))
+               ((symbol-function 'message) #'ignore))
+       (elogcat-toggle-package "com.example.app")
+       (should refreshed)
+       (should (equal elogcat--records (list record)))
+       (setq refreshed nil)
+       (elogcat-toggle-package "com.example.app")
+       (should refreshed)
+       (should (equal elogcat--records (list record)))))))
 
 (ert-deftest elogcat-parse-threadtime-record ()
   "Threadtime fields are retained as a structured record."

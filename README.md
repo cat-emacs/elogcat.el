@@ -9,8 +9,16 @@ messages remain available when the stream resumes. The mode line reports
 `LIVE`, `HOLD`, or `PAUSED`, plus `WRAP` when soft wrapping is enabled.
 
 Multi-line exceptions retain their header metadata, so tag, PID, and level
-filters keep stack traces together. Error/Fatal headers and stack frames can be
-browsed as one wrapping occurrence sequence.
+filters keep stack traces together. Error/Fatal/Assert headers and stack frames
+can be browsed as one wrapping occurrence sequence.
+
+Package filtering follows Android Studio's client-side model. `P` selects an
+installed package without restarting adb or clearing the backlog. `elogcat`
+periodically associates package UIDs with running PIDs and process names, so
+filters follow app restarts and include remote processes such as
+`com.example.app:worker`. Error, Fatal, and Assert messages emitted by proxy
+processes such as `AndroidRuntime` are retained when their complete message
+mentions the selected package.
 
 ## ScreenShot
 
@@ -44,12 +52,12 @@ Key | Function
 <kbd>SPC</kbd> | Pause/resume rendering (messages continue entering the backlog)
 <kbd>f</kbd> | Toggle follow-tail (`LIVE`/`HOLD`)
 <kbd>W</kbd> | Toggle soft wrapping
-<kbd>n</kbd> / <kbd>p</kbd> | Next/previous Error, Fatal, or stack frame
+<kbd>n</kbd> / <kbd>p</kbd> | Next/previous Error, Fatal, Assert, or stack frame
 <kbd>C</kbd> | Clear the device log and local backlog
 <kbd>i</kbd> / <kbd>x</kbd> | Set include/exclude regexp and redraw immediately
 <kbd>I</kbd> / <kbd>X</kbd> | Clear include/exclude regexp
 <kbd>L</kbd> | Set minimum log level and redraw immediately
-<kbd>P</kbd> | Filter by a running Android package
+<kbd>P</kbd> | Toggle local structured filtering by an installed package
 <kbd>g</kbd> | Show stream and filter status
 <kbd>F</kbd> | Run `occur`
 <kbd>S</kbd> | Save the buffer and stop Logcat
@@ -66,7 +74,8 @@ Key | Function
 ```elisp
 (setq elogcat-backlog-size (* 8 1024 1024) ; retained characters
       elogcat-soft-wrap t                   ; default for new buffers
-      elogcat-default-tail 100)             ; initial device history
+      elogcat-default-tail 100              ; initial device history
+      elogcat-process-refresh-interval 2)    ; package/PID refresh seconds
 ```
 
 `elogcat-backlog-size` bounds the in-memory records and displayed output. Once

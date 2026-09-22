@@ -34,7 +34,12 @@
 ;;;; Declarations
 (cl-defstruct elogcat-record
   "One structured threadtime log record."
-  raw level timestamp pid tid tag message)
+  raw level timestamp pid tid tag message application-ids process-name
+  message-group system-p)
+
+(cl-defstruct elogcat-process-info
+  "Application metadata for one Android process."
+  application-ids process-name)
 
 (defvar-local elogcat-pending-output ""
   "Incomplete adb output waiting for its terminating newline.")
@@ -53,6 +58,24 @@
 
 (defvar-local elogcat-follow-tail t
   "Non-nil when Logcat windows should follow new records.")
+
+(defvar-local elogcat-package-filter nil
+  "Package name used to filter the current Logcat buffer.")
+
+(defvar-local elogcat--process-table nil
+  "Hash table mapping PID strings to `elogcat-process-info' values.")
+
+(defvar-local elogcat--process-refresh-timer nil
+  "Timer used to refresh Android process metadata.")
+
+(defvar-local elogcat--process-refresh-process nil
+  "Active asynchronous process metadata query.")
+
+(defvar-local elogcat--unresolved-records nil
+  "Recent records awaiting one process metadata refresh.")
+
+(defvar-local elogcat--package-message-cache nil
+  "Message groups whose Error/Fatal/Assert text mentions the selected package.")
 
 (defgroup elogcat nil
   "Interface with elogcat."
@@ -88,9 +111,10 @@
     ("I" . elogcat-info-face)
     ("W" . elogcat-warning-face)
     ("E" . elogcat-error-face)
-    ("F" . elogcat-fatal-face)))
+    ("F" . elogcat-fatal-face)
+    ("A" . elogcat-fatal-face)))
 
-(defconst elogcat-level-priority '("V" "D" "I" "W" "E" "F")
+(defconst elogcat-level-priority '("V" "D" "I" "W" "E" "F" "A")
   "Log levels in ascending priority order.")
 
 (defcustom elogcat-logcat-command
@@ -117,12 +141,15 @@ The backlog enables filtering and formatting without restarting adb."
   :group 'elogcat
   :type 'boolean)
 
+(defcustom elogcat-process-refresh-interval 2
+  "Seconds between process metadata refreshes while filtering by package."
+  :group 'elogcat
+  :type 'number)
+
 (defvar-local elogcat-include-filter-regexp nil)
 (defvar-local elogcat-exclude-filter-regexp nil)
 (defvar-local elogcat-min-level "V"
-  "Minimum log level to display.  One of V D I W E F.")
-(defvar elogcat-package-filter nil
-  "Current package filter string shown in mode line, e.g. \"com.example:1234\".")
+  "Minimum log level to display.  One of V D I W E F A.")
 
 (defconst elogcat-process-name "elogcat")
 
@@ -175,6 +202,7 @@ The backlog enables filtering and formatting without restarting adb."
       (erase-buffer)
       (setq elogcat--records nil
             elogcat--records-tail nil
+            elogcat--unresolved-records nil
             elogcat--backlog-size 0
             elogcat-pending-output "")))
   (start-process-shell-command "elogcat-clear"
@@ -215,10 +243,15 @@ The backlog enables filtering and formatting without restarting adb."
 (defun elogcat-show-status ()
   "Show current Logcat state in the echo area."
   (interactive)
-  (message "elogcat: %s; include=%S; exclude=%S; level=%s; %d records"
-           (if elogcat-paused "paused" (if elogcat-follow-tail "live" "hold"))
-           elogcat-include-filter-regexp elogcat-exclude-filter-regexp
-           elogcat-min-level (length elogcat--records)))
+  (message
+   "elogcat: %s; package=%S (%d processes); include=%S; exclude=%S; level=%s; %d records"
+   (if elogcat-paused "paused" (if elogcat-follow-tail "live" "hold"))
+   elogcat-package-filter
+   (if (hash-table-p elogcat--process-table)
+       (hash-table-count elogcat--process-table)
+     0)
+   elogcat-include-filter-regexp elogcat-exclude-filter-regexp
+   elogcat-min-level (length elogcat--records)))
 
 (defun elogcat-set-include-filter (regexp)
   "Set the REGEXP for include filter."
@@ -237,34 +270,204 @@ Only lines at or above this level will be displayed."
    (list (completing-read
           (format "Min level (current: %s): " elogcat-min-level)
           '("V - Verbose" "D - Debug" "I - Info"
-            "W - Warning" "E - Error" "F - Fatal")
+            "W - Warning" "E - Error" "F - Fatal" "A - Assert")
           nil t)))
   (setq elogcat-min-level (substring level 0 1))
   (elogcat--redraw-unless-paused)
   (message "elogcat: min level set to %s" elogcat-min-level))
 
+(defconst elogcat--process-query-command
+  (concat "printf '__ELOGCAT_PACKAGES__\\n'; "
+          "cmd package list packages -U; "
+          "printf '__ELOGCAT_PROCESSES__\\n'; "
+          "ps -A -n -o UID,PID,NAME 2>/dev/null || ps -A -o UID,PID,NAME")
+  "Device shell command used to associate processes with packages.")
+
+(defun elogcat--numeric-android-uid (uid)
+  "Return UID normalized from a numeric or Android uN_aM process user."
+  (cond
+   ((string-match-p "\\`[0-9]+\\'" uid) uid)
+   ((string-match "\\`u\\([0-9]+\\)_a\\([0-9]+\\)\\'" uid)
+    (number-to-string
+     (+ (* (string-to-number (match-string 1 uid)) 100000)
+        10000
+        (string-to-number (match-string 2 uid)))))
+   (t uid)))
+
+(defun elogcat--packages-for-process (packages process-name)
+  "Disambiguate PACKAGES using PROCESS-NAME when possible."
+  (or (seq-filter
+       (lambda (package)
+         (or (equal process-name package)
+             (string-prefix-p (concat package ":") process-name)))
+       packages)
+      packages))
+
+(defun elogcat--parse-process-query (output)
+  "Return a PID table parsed from process metadata OUTPUT."
+  (let ((uid-packages (make-hash-table :test #'equal))
+        (table (make-hash-table :test #'equal))
+        section)
+    (dolist (line (split-string output "\n" t))
+      (cond
+       ((equal line "__ELOGCAT_PACKAGES__") (setq section 'packages))
+       ((equal line "__ELOGCAT_PROCESSES__") (setq section 'processes))
+       ((and (eq section 'packages)
+             (string-match "^package:\\([^[:space:]]+\\).*uid:\\([0-9]+\\)" line))
+        (push (match-string 1 line)
+              (gethash (match-string 2 line) uid-packages)))
+       ((and (eq section 'processes)
+             (string-match
+              "^[[:space:]]*\\([^[:space:]]+\\)[[:space:]]+\\([0-9]+\\)[[:space:]]+\\([^[:space:]]+\\)"
+              line))
+        (let* ((uid (match-string 1 line))
+               (pid (match-string 2 line))
+               (process-name (match-string 3 line))
+               (packages
+                (elogcat--packages-for-process
+                 (gethash (elogcat--numeric-android-uid uid) uid-packages)
+                 process-name)))
+          (puthash pid
+                   (make-elogcat-process-info
+                    :application-ids packages
+                    :process-name process-name)
+                   table)))))
+    table))
+
+(defun elogcat--apply-process-info (record &optional table)
+  "Apply process metadata from TABLE to RECORD and return RECORD."
+  (let ((process-table (or table elogcat--process-table)))
+    (when (hash-table-p process-table)
+      (when-let* ((info (gethash (elogcat-record-pid record) process-table)))
+        (setf (elogcat-record-application-ids record)
+              (elogcat-process-info-application-ids info)
+              (elogcat-record-process-name record)
+              (elogcat-process-info-process-name info)))))
+  record)
+
+(defun elogcat--update-process-table (table)
+  "Install TABLE and enrich recently unresolved records."
+  (setq elogcat--process-table table)
+  (let (changed)
+    (dolist (record elogcat--unresolved-records)
+      (when (gethash (elogcat-record-pid record) table)
+        (elogcat--apply-process-info record table)
+        (setq changed t)))
+    (setq elogcat--unresolved-records nil)
+    (when (and changed elogcat-package-filter)
+      (elogcat--redraw-unless-paused))))
+
+(defun elogcat--process-query-sentinel (process _event)
+  "Consume process metadata when PROCESS exits successfully."
+  (let ((target (process-get process 'elogcat-target-buffer))
+        (output-buffer (process-buffer process)))
+    (unwind-protect
+        (when (and (eq (process-status process) 'exit)
+                   (= (process-exit-status process) 0)
+                   (buffer-live-p target)
+                   (buffer-live-p output-buffer))
+          (let ((output (with-current-buffer output-buffer (buffer-string))))
+            (with-current-buffer target
+              (setq elogcat--process-refresh-process nil)
+              (elogcat--update-process-table
+               (elogcat--parse-process-query output)))))
+      (when (buffer-live-p output-buffer)
+        (kill-buffer output-buffer)))))
+
+(defun elogcat--refresh-process-table ()
+  "Asynchronously refresh package and process metadata for this buffer."
+  (unless (process-live-p elogcat--process-refresh-process)
+    (let ((output-buffer (generate-new-buffer " *elogcat-processes*")))
+      (setq elogcat--process-refresh-process
+            (make-process
+             :name "elogcat-processes"
+             :buffer output-buffer
+             :command (list "adb" "shell" elogcat--process-query-command)
+             :connection-type 'pipe
+             :noquery t
+             :sentinel #'elogcat--process-query-sentinel))
+      (process-put elogcat--process-refresh-process
+                   'elogcat-target-buffer (current-buffer)))))
+
+(defun elogcat--stop-process-monitor ()
+  "Stop the current buffer's package process monitor."
+  (when (timerp elogcat--process-refresh-timer)
+    (cancel-timer elogcat--process-refresh-timer))
+  (setq elogcat--process-refresh-timer nil)
+  (when (process-live-p elogcat--process-refresh-process)
+    (delete-process elogcat--process-refresh-process))
+  (setq elogcat--process-refresh-process nil))
+
+(defun elogcat--start-process-monitor ()
+  "Start refreshing package process metadata for this buffer."
+  (elogcat--stop-process-monitor)
+  (elogcat--refresh-process-table)
+  (setq elogcat--process-refresh-timer
+        (run-at-time elogcat-process-refresh-interval
+                     elogcat-process-refresh-interval
+                     (lambda (buffer)
+                       (when (buffer-live-p buffer)
+                         (with-current-buffer buffer
+                           (elogcat--refresh-process-table))))
+                     (current-buffer))))
+
 (defconst elogcat--threadtime-regexp
   (concat "^\\([0-9][0-9]-[0-9][0-9] +[0-9:.]+\\)"
-          " +\\([0-9]+\\) +\\([0-9]+\\) \\([VDIWEF]\\) "
+          " +\\([0-9]+\\) +\\([0-9]+\\) \\([VDIWEFA]\\) "
           "\\([^:]*?\\) *: \\(.*\\)$")
   "Regexp for adb logcat's threadtime format.")
 
+(defun elogcat--track-unresolved-record (record)
+  "Queue RECORD for the next process metadata refresh when needed."
+  (when (and (elogcat-record-pid record)
+             (null (elogcat-record-application-ids record)))
+    (push record elogcat--unresolved-records))
+  record)
+
+(defun elogcat--same-message-header-p (record previous)
+  "Return non-nil when RECORD and PREVIOUS share one threadtime header."
+  (and previous
+       (equal (elogcat-record-timestamp record)
+              (elogcat-record-timestamp previous))
+       (equal (elogcat-record-pid record) (elogcat-record-pid previous))
+       (equal (elogcat-record-tid record) (elogcat-record-tid previous))
+       (equal (elogcat-record-level record) (elogcat-record-level previous))
+       (equal (elogcat-record-tag record) (elogcat-record-tag previous))))
+
 (defun elogcat--parse-record (line &optional previous)
   "Parse threadtime LINE, inheriting metadata from PREVIOUS for continuations."
-  (if (string-match elogcat--threadtime-regexp line)
-      (make-elogcat-record
-       :raw line :timestamp (match-string 1 line)
-       :pid (match-string 2 line) :tid (match-string 3 line)
-       :level (match-string 4 line) :tag (string-trim (match-string 5 line))
-       :message (match-string 6 line))
+  (cond
+   ((string-prefix-p "--------- beginning of " line)
     (make-elogcat-record
-     :raw line
-     :timestamp (and previous (elogcat-record-timestamp previous))
-     :pid (and previous (elogcat-record-pid previous))
-     :tid (and previous (elogcat-record-tid previous))
-     :level (and previous (elogcat-record-level previous))
-     :tag (and previous (elogcat-record-tag previous))
-     :message line)))
+     :raw line :message line :message-group (cons nil nil) :system-p t))
+   ((string-match elogcat--threadtime-regexp line)
+      (let ((record
+             (make-elogcat-record
+              :raw line :timestamp (match-string 1 line)
+              :pid (match-string 2 line) :tid (match-string 3 line)
+              :level (match-string 4 line)
+              :tag (string-trim (match-string 5 line))
+              :message (match-string 6 line))))
+        (setf (elogcat-record-message-group record)
+              (if (elogcat--same-message-header-p record previous)
+                  (elogcat-record-message-group previous)
+                (cons nil nil)))
+        (elogcat--apply-process-info record)
+        (elogcat--track-unresolved-record record)))
+   (t
+    (elogcat--track-unresolved-record
+     (make-elogcat-record
+      :raw line
+      :timestamp (and previous (elogcat-record-timestamp previous))
+      :pid (and previous (elogcat-record-pid previous))
+      :tid (and previous (elogcat-record-tid previous))
+      :level (and previous (elogcat-record-level previous))
+      :tag (and previous (elogcat-record-tag previous))
+      :application-ids (and previous (elogcat-record-application-ids previous))
+      :process-name (and previous (elogcat-record-process-name previous))
+      :message-group (or (and previous (elogcat-record-message-group previous))
+                         (cons nil nil))
+      :message line)))))
 
 (defun elogcat--record-filter-text (record)
   "Return searchable text for RECORD, including inherited metadata."
@@ -275,23 +478,64 @@ Only lines at or above this level will be displayed."
                              (elogcat-record-tid record)
                              (elogcat-record-level record)
                              (elogcat-record-tag record)
+                             (elogcat-record-process-name record)
+                             (string-join (elogcat-record-application-ids record) " ")
                              (elogcat-record-message record)))
              " "))
 
+(defun elogcat--rebuild-package-message-cache (&optional records)
+  "Cache Error/Fatal/Assert groups mentioning the selected package in RECORDS."
+  (setq elogcat--package-message-cache (make-hash-table :test #'eq))
+  (when elogcat-package-filter
+    (dolist (record (or records elogcat--records))
+      (when (and (member (elogcat-record-level record) '("E" "F" "A"))
+                 (string-match-p (regexp-quote elogcat-package-filter)
+                                 (elogcat-record-message record)))
+        (puthash (elogcat-record-message-group record) t
+                 elogcat--package-message-cache)))))
+
+(defun elogcat--cache-package-message-groups (records)
+  "Cache matching groups from RECORDS and return non-nil for a new match."
+  (let (changed)
+    (when elogcat-package-filter
+      (unless (hash-table-p elogcat--package-message-cache)
+        (setq elogcat--package-message-cache (make-hash-table :test #'eq)))
+      (dolist (record records)
+        (let ((group (elogcat-record-message-group record)))
+          (when (and (member (elogcat-record-level record) '("E" "F" "A"))
+                     (string-match-p (regexp-quote elogcat-package-filter)
+                                     (elogcat-record-message record))
+                     (not (gethash group elogcat--package-message-cache)))
+            (puthash group t elogcat--package-message-cache)
+            (setq changed t)))))
+    changed))
+
+(defun elogcat--package-matches-p (record)
+  "Return non-nil when RECORD belongs to `elogcat-package-filter'."
+  (or (null elogcat-package-filter)
+      (elogcat-record-system-p record)
+      (member elogcat-package-filter (elogcat-record-application-ids record))
+      (and (member (elogcat-record-level record) '("E" "F" "A"))
+           (gethash (elogcat-record-message-group record)
+                    elogcat--package-message-cache))))
+
 (defun elogcat--record-matches-p (record)
   "Return non-nil when RECORD passes current filters."
-  (let* ((text (elogcat--record-filter-text record))
-         (level (elogcat-record-level record))
-         (minimum (or (cl-position elogcat-min-level elogcat-level-priority
-                                   :test #'string=) 0)))
-    (and (or (null level)
-             (>= (or (cl-position level elogcat-level-priority
-                                  :test #'string=) 0)
-                 minimum))
-         (or (null elogcat-include-filter-regexp)
-             (string-match-p elogcat-include-filter-regexp text))
-         (or (null elogcat-exclude-filter-regexp)
-             (not (string-match-p elogcat-exclude-filter-regexp text))))))
+  (if (elogcat-record-system-p record)
+      t
+    (let* ((text (elogcat--record-filter-text record))
+           (level (elogcat-record-level record))
+           (minimum (or (cl-position elogcat-min-level elogcat-level-priority
+                                     :test #'string=) 0)))
+      (and (elogcat--package-matches-p record)
+           (or (null level)
+               (>= (or (cl-position level elogcat-level-priority
+                                    :test #'string=) 0)
+                   minimum))
+           (or (null elogcat-include-filter-regexp)
+               (string-match-p elogcat-include-filter-regexp text))
+           (or (null elogcat-exclude-filter-regexp)
+               (not (string-match-p elogcat-exclude-filter-regexp text)))))))
 
 (defun elogcat--record-size (record)
   "Return approximate retained size of RECORD."
@@ -325,7 +569,7 @@ Only lines at or above this level will be displayed."
   (let* ((level (elogcat-record-level record))
          (face (cdr (or (assoc level elogcat-face-alist)
                         (assoc "V" elogcat-face-alist))))
-         (occurrence (and (or (and (member level '("E" "F"))
+         (occurrence (and (or (and (member level '("E" "F" "A"))
                                    (string-match-p elogcat--threadtime-regexp
                                                    (elogcat-record-raw record)))
                               (string-match-p
@@ -431,9 +675,15 @@ Only lines at or above this level will be displayed."
              (gc-cons-threshold most-positive-fixnum)
              (inhibit-redisplay t)
              (buffer-read-only nil)
-             (trimmed (elogcat--add-records records)))
+             (trimmed (elogcat--add-records records))
+             (new-package-group
+              (if trimmed
+                  (progn
+                    (elogcat--rebuild-package-message-cache)
+                    t)
+                (elogcat--cache-package-message-groups records))))
         (unless elogcat-paused
-          (if trimmed
+          (if (or trimmed new-package-group)
               (elogcat--render-backlog)
             (elogcat--insert-records records))
           (dolist (window following-windows)
@@ -472,7 +722,7 @@ Only lines at or above this level will be displayed."
   (message "elogcat: soft wrap %s" (if truncate-lines "off" "on")))
 
 (defun elogcat--occurrence-positions ()
-  "Return positions of error records and stack frames in the current buffer."
+  "Return positions of errors, assertions, and stack frames in this buffer."
   (let ((position (point-min)) positions)
     (while (< position (point-max))
       (when (get-text-property position 'elogcat-occurrence)
@@ -501,12 +751,12 @@ Only lines at or above this level will be displayed."
         (recenter)))))
 
 (defun elogcat-next-occurrence ()
-  "Move to the next error or stack frame, wrapping at the end."
+  "Move to the next error, assertion, or stack frame, wrapping at the end."
   (interactive)
   (elogcat--move-occurrence 1))
 
 (defun elogcat-previous-occurrence ()
-  "Move to the previous error or stack frame, wrapping at the start."
+  "Move to the previous error, assertion, or stack frame, wrapping at the start."
   (interactive)
   (elogcat--move-occurrence -1))
 
@@ -528,6 +778,7 @@ Only lines at or above this level will be displayed."
                 (erase-buffer)
                 (setq elogcat--records nil
                       elogcat--records-tail nil
+                      elogcat--unresolved-records nil
                       elogcat--backlog-size 0
                       elogcat-pending-output ""))
               (elogcat-stop)
@@ -577,7 +828,11 @@ Only lines at or above this level will be displayed."
   (when elogcat-mode
     (setq-local truncate-lines (not elogcat-soft-wrap)
                 elogcat-paused nil
-                elogcat-follow-tail t)
+                elogcat-follow-tail t
+                elogcat--process-table (make-hash-table :test #'equal)
+                elogcat--unresolved-records nil
+                elogcat--package-message-cache (make-hash-table :test #'eq))
+    (add-hook 'kill-buffer-hook #'elogcat--stop-process-monitor nil t)
     (buffer-disable-undo)))
 
 (defun elogcat-exit ()
@@ -590,46 +845,34 @@ Only lines at or above this level will be displayed."
       (sleep-for 0.1))
     (kill-buffer buf)))
 
-(defun elogcat-toggle-package (pkg)
-  "Toggle filtering logcat output by Android package PKG.
-Interactively, select from installed third-party packages.
-If the selected package is already filtered, remove the filter."
+(defun elogcat-toggle-package (package)
+  "Toggle local structured filtering by Android application PACKAGE.
+The Logcat process and retained backlog are not restarted or cleared."
   (interactive
    (list (completing-read
-          "Select package: "
+          "Filter package (select current package again to clear): "
           (mapcar (lambda (name)
-                    (replace-regexp-in-string "package:" "" name))
+                    (s-chop-prefix "package:" name))
                   (split-string
                    (string-trim
-                    (shell-command-to-string "adb shell pm list package -3"))
-                   "\n")))))
-  (let ((pid (string-trim
-              (shell-command-to-string (concat "adb shell pidof " pkg))))
-        (option " --pid="))
-    (when (string-empty-p pid)
-      (error "App %s is not running" pkg))
-    (if (string-match (format "\\(%s\\)\\([0-9]*\\)"
-                              (regexp-quote option))
-                      elogcat-logcat-command)
-        (setq elogcat-logcat-command
-              (if (string= (match-string 2 elogcat-logcat-command) pid)
-                  (progn (setq elogcat-package-filter nil)
-                         (replace-match "" nil nil elogcat-logcat-command))
-                (setq elogcat-package-filter (format "%s:%s" pkg pid))
-                (replace-match pid nil nil elogcat-logcat-command 2)))
-      (setq elogcat-logcat-command (concat elogcat-logcat-command option pid))
-      (setq elogcat-package-filter (format "%s:%s" pkg pid))))
-  (let ((buffer-read-only nil))
-    (erase-buffer)
-    (setq elogcat--records nil
-          elogcat--records-tail nil
-          elogcat--backlog-size 0
-          elogcat-pending-output ""))
-  (elogcat-stop)
-  (elogcat))
+                    (shell-command-to-string
+                     "adb shell pm list packages -3"))
+                   "\n" t))
+          nil nil nil nil elogcat-package-filter)))
+  (setq elogcat-package-filter
+        (unless (or (string-empty-p package)
+                    (equal package elogcat-package-filter))
+          package))
+  (elogcat--rebuild-package-message-cache)
+  (elogcat--refresh-process-table)
+  (elogcat--redraw-unless-paused)
+  (message "elogcat: package filter %s"
+           (or elogcat-package-filter "cleared")))
 
 (defun elogcat-stop ()
-  "Stop the adb logcat process."
+  "Stop the adb Logcat process and package process monitor."
+  (when (bound-and-true-p elogcat-mode)
+    (elogcat--stop-process-monitor))
   (-when-let (proc (get-process "elogcat"))
     (delete-process proc)))
 
@@ -659,7 +902,8 @@ With bare \\[universal-argument], replay full ring buffer history."
       (with-current-buffer elogcat-buffer
         (elogcat-mode t)
         (setq buffer-read-only t)
-        (font-lock-mode -1))
+        (font-lock-mode -1)
+        (elogcat--start-process-monitor))
       (switch-to-buffer elogcat-buffer)
       (goto-char (point-max)))))
 
