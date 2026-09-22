@@ -38,8 +38,9 @@
 
 ;;;; Declarations
 
-(declare-function android-current-application-id "android-mode"
-                  (&optional prompt file project-root))
+(declare-function android-root "android-mode" ())
+(declare-function android-project-application-ids "android-mode"
+                  (&optional project-root refresh))
 
 (defface elogcat-verbose-face '((t (:inherit default)))
   "Font Lock face used to highlight VERBOSE log records."
@@ -105,10 +106,11 @@ The default matches Android Studio.  Set this to nil to show all messages."
   :type '(choice (const :tag "Show all messages" nil) string))
 
 (defcustom elogcat-project-package-function
-  #'elogcat--android-mode-project-package
-  "Function returning the application ID represented by `package:mine'.
-It is called in the buffer from which `elogcat' starts.  The default uses
-`android-current-application-id' when `android-mode' provides it."
+  #'elogcat--android-mode-project-packages
+  "Function returning application IDs represented by `package:mine'.
+It is called in the buffer from which `elogcat' starts.  The function may
+return one string or a list of strings.  The default uses
+`android-project-application-ids' when `android-mode' provides it."
   :group 'elogcat
   :type '(choice (const :tag "Do not resolve automatically" nil) function))
 
@@ -165,7 +167,7 @@ It is called in the buffer from which `elogcat' starts.  The default uses
    " " (or elogcat-device-name elogcat-device-serial "discovering")
    "    " (propertize "Mine:" 'face 'bold)
    " " (if elogcat-package-filter
-           elogcat-package-filter
+           (string-join (elogcat--mine-packages) ", ")
          (propertize "unresolved (ignored; P to select)" 'face 'warning))
    "    " (propertize "Filter:" 'face 'bold)
    " " (or elogcat-query-filter "all messages")
@@ -1004,19 +1006,44 @@ Only lines at or above this level will be displayed."
       (delete-process proc))
     (kill-buffer buf)))
 
-(defun elogcat--android-mode-project-package ()
-  "Return android-mode's application ID for the current project context."
-  (when (fboundp 'android-current-application-id)
-    (ignore-errors (android-current-application-id))))
+(defun elogcat--normalize-project-packages (packages)
+  "Return PACKAGES as a distinct list of non-empty strings."
+  (delete-dups
+   (seq-filter (lambda (package)
+                 (and (stringp package) (not (string-empty-p package))))
+               (if (listp packages) packages (list packages)))))
 
-(defun elogcat--set-mine (package)
-  "Set PACKAGE as the application represented by `package:mine'."
-  (setq elogcat-package-filter (unless (string-empty-p package) package))
+(defun elogcat--android-mode-project-packages (&optional project-root)
+  "Return `android-mode' application IDs for optional PROJECT-ROOT."
+  (when (fboundp 'android-project-application-ids)
+    (ignore-errors (android-project-application-ids project-root))))
+
+(defun elogcat--project-model-updated (root _data)
+  "Update automatic Mine selections after the model for ROOT changes."
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (when (and (derived-mode-p 'elogcat-mode)
+                 elogcat--mine-auto-p
+                 elogcat-project-root
+                 (string= (file-name-as-directory (expand-file-name root))
+                          (file-name-as-directory
+                           (expand-file-name elogcat-project-root))))
+        (let ((packages (elogcat--android-mode-project-packages root)))
+          (unless (equal packages elogcat-package-filter)
+            (elogcat--set-mine packages t)))))))
+
+(defun elogcat--set-mine (packages &optional automatic)
+  "Set PACKAGES as the IDs represented by Mine.
+With AUTOMATIC non-nil, keep following Android project model updates."
+  (setq elogcat-package-filter (elogcat--normalize-project-packages packages)
+        elogcat--mine-auto-p automatic)
   (elogcat--rebuild-package-message-cache)
   (elogcat--refresh-process-table)
   (elogcat--redraw-unless-paused)
   (message "elogcat: package:mine is %s"
-           (or elogcat-package-filter "not selected")))
+           (if elogcat-package-filter
+               (string-join elogcat-package-filter ", ")
+             "not selected")))
 
 (defun elogcat--select-mine-from-metadata (metadata)
   "Prompt for Mine using package METADATA."
@@ -1026,7 +1053,8 @@ Only lines at or above this level will be displayed."
            (packages (delete-dups
                       (append observed (plist-get metadata :packages))))
            (package (completing-read "Project application ID: " packages
-                                     nil nil nil nil elogcat-package-filter)))
+                                     nil nil nil nil
+                                     (car (elogcat--mine-packages)))))
       (elogcat--set-mine package))))
 
 (defun elogcat-select-mine ()
@@ -1087,19 +1115,27 @@ requests complete available history."
          (existing (get-buffer elogcat-buffer))
          (new-session (not (buffer-live-p existing)))
          (buffer (get-buffer-create elogcat-buffer))
-         (project-package
+         (project-packages
           (with-current-buffer source-buffer
             (and elogcat-project-package-function
-                 (funcall elogcat-project-package-function))))
+                 (elogcat--normalize-project-packages
+                  (funcall elogcat-project-package-function)))))
          (project-root
           (with-current-buffer source-buffer
-            (or (when-let* ((project (project-current nil)))
+            (or (and (fboundp 'android-root)
+                     (ignore-errors (android-root)))
+                (when-let* ((project (project-current nil)))
                   (expand-file-name (project-root project)))
                 default-directory))))
     (with-current-buffer buffer
       (when new-session (elogcat-mode))
       (setq elogcat-project-root (or elogcat-project-root project-root)
-            elogcat-package-filter (or elogcat-package-filter project-package)
+            elogcat-package-filter (or elogcat-package-filter project-packages)
+            elogcat--mine-auto-p
+            (or elogcat--mine-auto-p
+                (and new-session
+                     (eq elogcat-project-package-function
+                         #'elogcat--android-mode-project-packages)))
             elogcat--start-tail
             (cond ((consp arg) nil)
                   (arg (list "-T" (number-to-string
@@ -1125,6 +1161,9 @@ requests complete available history."
   (interactive)
   (save-buffer)
   (elogcat-stop))
+
+(add-hook 'android-project-model-updated-hook
+          #'elogcat--project-model-updated)
 
 (provide 'elogcat)
 ;;; elogcat.el ends here

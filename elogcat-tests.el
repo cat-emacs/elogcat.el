@@ -108,15 +108,54 @@
                   "package:mine | tag:Other" record)))))
 
 (ert-deftest elogcat-project-package-uses-public-android-api ()
-  "The default project resolver consumes only android-mode's public API."
+  "The default project resolver consumes android-mode's ID collection API."
   (let (called)
-    (cl-letf (((symbol-function 'android-current-application-id)
-               (lambda (&optional _prompt _file _root)
+    (cl-letf (((symbol-function 'android-project-application-ids)
+               (lambda (&optional _root _refresh)
                  (setq called t)
-                 "com.example.app")))
-      (should (equal (elogcat--android-mode-project-package)
-                     "com.example.app"))
+                 '("com.example.app" "com.example.demo"))))
+      (should (equal (elogcat--android-mode-project-packages)
+                     '("com.example.app" "com.example.demo")))
       (should called))))
+
+(ert-deftest elogcat-project-package-normalizes-custom-resolvers ()
+  "Custom Mine resolvers may return one ID or a distinct ID list."
+  (should (equal (elogcat--normalize-project-packages "com.example.app")
+                 '("com.example.app")))
+  (should (equal
+           (elogcat--normalize-project-packages
+            '("com.example.app" "" nil "com.example.app" "com.example.demo"))
+           '("com.example.app" "com.example.demo"))))
+
+(ert-deftest elogcat-project-model-refresh-updates-automatic-mine ()
+  "A completed android-mode refresh resolves an automatic Mine selection."
+  (elogcat-tests--with-buffer
+   (let (refreshed)
+     (setq elogcat-project-root "/tmp/project/"
+           elogcat--mine-auto-p t
+           elogcat-package-filter nil)
+     (cl-letf (((symbol-function 'elogcat--android-mode-project-packages)
+                (lambda (&optional _root)
+                  '("com.example.app" "com.example.demo")))
+               ((symbol-function 'elogcat--refresh-process-table) #'ignore)
+               ((symbol-function 'elogcat--redraw-unless-paused)
+                (lambda () (setq refreshed t)))
+               ((symbol-function 'message) #'ignore))
+       (elogcat--project-model-updated "/tmp/project/" nil)
+       (should (equal elogcat-package-filter
+                      '("com.example.app" "com.example.demo")))
+       (should refreshed)))))
+
+(ert-deftest elogcat-manual-mine-stops-following-project-model ()
+  "Selecting one package manually disables automatic project Mine updates."
+  (elogcat-tests--with-buffer
+   (cl-letf (((symbol-function 'elogcat--refresh-process-table) #'ignore)
+             ((symbol-function 'elogcat--redraw-unless-paused) #'ignore)
+             ((symbol-function 'message) #'ignore))
+     (setq elogcat--mine-auto-p t)
+     (elogcat--set-mine "com.example.manual")
+     (should (equal elogcat-package-filter '("com.example.manual")))
+     (should-not elogcat--mine-auto-p))))
 
 (ert-deftest elogcat-package-mine-keeps-system-and-assert-crash-messages ()
   "System markers and Assert proxy crashes survive package:mine queries."
@@ -133,17 +172,17 @@
      (should (elogcat--record-matches-p crash)))))
 
 (ert-deftest elogcat-package-mine-uses-structured-application-id ()
-  "Package mine matches application IDs exactly rather than PID or text."
+  "Package mine matches any project application ID exactly."
   (elogcat-tests--with-buffer
    (setq elogcat--process-table
          (elogcat-tests--process-table)
-         elogcat-package-filter "com.example.app"
+         elogcat-package-filter '("com.example.other" "com.example.app")
          elogcat--query-predicate (elogcat--query-compile "package:mine"))
    (let ((record (elogcat--parse-record elogcat-tests--debug)))
      (should (equal (elogcat-record-application-ids record)
                     '("com.example.app")))
      (should (elogcat--record-matches-p record))
-     (setq elogcat-package-filter "com.example")
+     (setq elogcat-package-filter '("com.example" "com.example.other"))
      (should-not (elogcat--record-matches-p record)))))
 
 (ert-deftest elogcat-process-query-supports-android-user-names ()

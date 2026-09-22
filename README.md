@@ -20,10 +20,11 @@ filters keep stack traces together. Error/Fatal/Assert headers and stack frames
 can be browsed as one wrapping occurrence sequence.
 
 `elogcat` starts with Android Studio's default `package:mine` query. When
-android-mode can resolve the current target through its public API, that
-target's application ID is used automatically. Otherwise Mine is marked as
-unresolved and the query temporarily shows all logs instead of an empty view;
-press `P` to select the application represented by `mine`. Package/process
+android-mode can resolve the project through its public API, the application
+IDs of all selected module targets are used automatically. Mine follows later
+asynchronous project-model refreshes. Otherwise Mine is marked as unresolved
+and the query temporarily shows all logs instead of an empty view; press `P` to
+replace the project set with one manually selected application. Package/process
 metadata is resolved client-side and follows app
 restarts and remote processes such as `com.example.app:worker`. Clear the `/`
 query to inspect all collected messages. Error, Fatal, and Assert messages
@@ -49,7 +50,8 @@ tag:Network | (process:worker & message~:"timeout|failed")
 
 Special filters include `level:verbose|debug|info|warn|error|assert`,
 `age:<number><s|m|h|d>`, `is:crash`, `is:stacktrace`, `is:firebase`, and exact
-levels such as `is:error`. `package:mine` uses the package selected with `P`.
+levels such as `is:error`. `package:mine` matches the project application ID
+set, or the single package selected with `P`.
 Invalid expressions fall back to a case-insensitive whole-line text search,
 matching Android Studio's failure behavior. `M-c` toggles case-sensitive query
 matching.
@@ -144,6 +146,8 @@ structured queries.
       elogcat-auto-reconnect-attempts 5       ; bounded reconnect retries
       elogcat-package-cache-ttl 60            ; cache package UID metadata
       elogcat-default-visible-fields '(raw)   ; or structured field list
+      elogcat-project-package-function        ; string/list resolver, or nil
+      #'elogcat--android-mode-project-packages
       elogcat-show-key-hints t                ; concise header shortcuts
       elogcat-process-refresh-interval 2)     ; package/PID refresh seconds
 ```

@@ -36,7 +36,9 @@
 (defvar-local elogcat-follow-tail t
   "Non-nil when Logcat windows should follow new records.")
 (defvar-local elogcat-package-filter nil
-  "Package name used to filter the current Logcat buffer.")
+  "Application ID list represented by `package:mine'.")
+(defvar-local elogcat--mine-auto-p nil
+  "Non-nil when Mine should follow Android project model updates.")
 (defvar-local elogcat--process-table nil
   "Hash table mapping PID strings to process metadata.")
 (defvar-local elogcat--process-refresh-timer nil)
@@ -93,14 +95,26 @@
   (or (car-safe (elogcat-record-message-group record))
       (elogcat-record-message record)))
 
+(defun elogcat--mine-packages ()
+  "Return the current Mine selection as an application ID list."
+  (if (listp elogcat-package-filter)
+      elogcat-package-filter
+    (and elogcat-package-filter (list elogcat-package-filter))))
+
+(defun elogcat--message-mentions-package-p (message)
+  "Return non-nil when MESSAGE mentions a selected application ID."
+  (seq-some (lambda (package)
+              (string-match-p (regexp-quote package) message))
+            (elogcat--mine-packages)))
+
 (defun elogcat--rebuild-package-message-cache (&optional records)
-  "Cache Error/Fatal/Assert groups mentioning the selected package in RECORDS."
+  "Cache Error/Fatal/Assert groups mentioning selected IDs in RECORDS."
   (setq elogcat--package-message-cache (make-hash-table :test #'eq))
   (when elogcat-package-filter
     (dolist (record (or records elogcat--records))
       (when (and (member (elogcat-record-level record) '("E" "F" "A"))
-                 (string-match-p (regexp-quote elogcat-package-filter)
-                                 (elogcat-record-message record)))
+                 (elogcat--message-mentions-package-p
+                  (elogcat-record-message record)))
         (puthash (elogcat-record-message-group record) t
                  elogcat--package-message-cache)))))
 
@@ -113,18 +127,20 @@
       (dolist (record records)
         (let ((group (elogcat-record-message-group record)))
           (when (and (member (elogcat-record-level record) '("E" "F" "A"))
-                     (string-match-p (regexp-quote elogcat-package-filter)
-                                     (elogcat-record-message record))
+                     (elogcat--message-mentions-package-p
+                      (elogcat-record-message record))
                      (not (gethash group elogcat--package-message-cache)))
             (puthash group t elogcat--package-message-cache)
             (setq changed t)))))
     changed))
 
 (defun elogcat--package-matches-p (record)
-  "Return non-nil when RECORD belongs to `elogcat-package-filter'."
+  "Return non-nil when RECORD belongs to a selected application ID."
   (or (null elogcat-package-filter)
       (elogcat-record-system-p record)
-      (member elogcat-package-filter (elogcat-record-application-ids record))
+      (seq-intersection (elogcat--mine-packages)
+                        (elogcat-record-application-ids record)
+                        #'string=)
       (and (member (elogcat-record-level record) '("E" "F" "A"))
            (gethash (elogcat-record-message-group record)
                     elogcat--package-message-cache))))
