@@ -83,6 +83,7 @@ It's available on [Melpa](https://melpa.org/):
 Requirements
 
 - **adb**
+- **Transient 0.3.0 or newer** (built into current Emacs releases)
 
 [Installing the Android SDK](https://developer.android.com/sdk/installing/)
 
@@ -98,8 +99,8 @@ Key bindings
 
 The `?` menu groups the primary command set. Frequent streaming and navigation
 commands remain available directly so normal Logcat use does not require an
-extra keystroke. The menu uses the optional `transient` package; when it is not
-installed, all commands remain available through `M-x`.
+extra keystroke. The menu uses Transient, which is built into current Emacs
+releases and installed as a package on older supported versions.
 
 Key | Function
 --- | --------

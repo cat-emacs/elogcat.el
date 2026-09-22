@@ -1,7 +1,6 @@
 EMACS ?= emacs
 BATCH = $(EMACS) -Q --batch
-SOURCES = elogcat-core.el elogcat-filter.el elogcat-process.el elogcat.el \
-	elogcat-transient.el
+SOURCES = elogcat-core.el elogcat-filter.el elogcat-process.el elogcat.el
 TEST_DEPS_DIR ?= .test-deps
 PACKAGE_DIR = $(abspath $(TEST_DEPS_DIR)/elpa)
 
@@ -10,7 +9,7 @@ ARCHIVES = --eval "(setq package-user-dir \"$(PACKAGE_DIR)\")" \
 	--eval "(add-to-list 'package-archives '(\"melpa\" . \"https://melpa.org/packages/\") t)" \
 	--eval "(package-initialize)"
 
-.PHONY: all install-deps compile test test-transient clean
+.PHONY: all install-deps compile test clean
 
 all: clean compile
 
@@ -29,11 +28,6 @@ test:
 	$(BATCH) $(ARCHIVES) -L . \
 		-l elogcat.el -l elogcat-tests.el \
 		-f ert-run-tests-batch-and-exit
-
-test-transient:
-	$(BATCH) $(ARCHIVES) -L . \
-		-l elogcat.el -l elogcat-transient.el -l elogcat-tests.el \
-		-f ert-run-tests-batch-and-exit '^elogcat-transient-'
 
 clean:
 	rm -f *.elc

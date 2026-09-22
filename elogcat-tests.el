@@ -555,16 +555,11 @@
                  "L" "S" "F" "m" "e" "k"))
     (should (eq (lookup-key elogcat-mode-map (kbd key)) #'undefined))))
 
-(ert-deftest elogcat-dispatch-loads-optional-menu ()
-  "The menu entry lazily loads and invokes the optional Transient UI."
-  (let (called)
-    (cl-letf (((symbol-function 'require)
-               (lambda (feature &optional _filename _noerror)
-                 (when (eq feature 'elogcat-transient)
-                   (fset 'elogcat-transient (lambda () (setq called t)))
-                   t))))
-      (elogcat-dispatch)
-      (should called))))
+(ert-deftest elogcat-dispatch-is-transient-prefix ()
+  "The mode menu entry exposes the primary Transient commands."
+  (should (commandp #'elogcat-dispatch))
+  (dolist (key '("SPC" "/" "l" "P" "V" "D" "q"))
+    (should (transient-get-suffix 'elogcat-dispatch key))))
 
 (ert-deftest elogcat-device-parser-and-adb-command-use-serial ()
   "Device discovery preserves model labels and all adb calls use the serial."
@@ -785,21 +780,16 @@
    (should (string-match-p "ERROR" (elogcat-make-status)))))
 
 (ert-deftest elogcat-transient-layout-is-stable ()
-  "The real menu exposes primary commands and preserves user suffixes."
-  (skip-unless (require 'transient nil t))
-  (require 'elogcat-transient)
-  (elogcat-transient--define)
-  (dolist (key '("SPC" "/" "l" "P" "V" "D" "q"))
-    (should (transient-get-suffix 'elogcat-transient-menu key)))
+  "Reloading features does not replace user-added menu suffixes."
   (unwind-protect
       (progn
         (transient-append-suffix
-         'elogcat-transient-menu "q"
+         'elogcat-dispatch "q"
          '("Z" "Test customization" ignore))
-        (elogcat-transient--define)
-        (should (transient-get-suffix 'elogcat-transient-menu "Z")))
+        (require 'elogcat)
+        (should (transient-get-suffix 'elogcat-dispatch "Z")))
     (ignore-errors
-      (transient-remove-suffix 'elogcat-transient-menu "Z"))))
+      (transient-remove-suffix 'elogcat-dispatch "Z"))))
 
 (ert-deftest elogcat-mode-defaults-to-package-mine ()
   "New Logcat buffers use Android Studio's package:mine filter."

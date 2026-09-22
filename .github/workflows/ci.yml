@@ -9,4 +9,4 @@ jobs:
     uses: cat-emacs/.github/.github/workflows/emacs-package.yml@v1
     with:
       install-command: make install-deps
-      check-command: make clean compile test test-transient
+      check-command: make clean compile test
