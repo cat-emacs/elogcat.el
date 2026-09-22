@@ -24,8 +24,14 @@
   "Device serial to cached package metadata.")
 
 (defconst elogcat--package-query-command
-  "cmd package list packages -U"
-  "Device command used to read package UID mappings.")
+  (concat "cmd package list packages -U; "
+          "echo ===ELOGCAT_THIRD_PARTY===; "
+          "cmd package list packages -3")
+  "Device command reading all package UIDs and third-party package choices.")
+
+(defconst elogcat--third-party-package-marker
+  "===ELOGCAT_THIRD_PARTY==="
+  "Separator between full and third-party package query output.")
 
 (defconst elogcat--process-list-command
   "ps -A -n -o UID,PID,NAME 2>/dev/null || ps -A -o UID,PID,NAME"
@@ -61,17 +67,26 @@
   (or serial elogcat-device-serial "default"))
 
 (defun elogcat--parse-package-output (output)
-  "Return UID and package metadata parsed from OUTPUT."
-  (let ((uid-packages (make-hash-table :test #'equal)) packages)
+  "Return full UID mappings and third-party choices parsed from OUTPUT."
+  (let ((uid-packages (make-hash-table :test #'equal))
+        packages third-party-packages third-party-p)
     (dolist (line (split-string output "\n" t))
-      (when (string-match
-             "^package:\\([^[:space:]]+\\).*uid:\\([0-9]+\\)" line)
+      (cond
+       ((equal line elogcat--third-party-package-marker)
+        (setq third-party-p t))
+       ((and third-party-p
+             (string-match "^package:\\([^[:space:]]+\\)" line))
+        (push (match-string 1 line) third-party-packages))
+       ((and (not third-party-p)
+             (string-match
+              "^package:\\([^[:space:]]+\\).*uid:\\([0-9]+\\)" line))
         (let ((package (match-string 1 line))
               (uid (match-string 2 line)))
           (push package (gethash uid uid-packages))
-          (push package packages))))
+          (push package packages)))))
     (list :time (float-time) :uids uid-packages
-          :packages (delete-dups packages))))
+          :packages (delete-dups packages)
+          :third-party-packages (delete-dups third-party-packages))))
 
 (defun elogcat--parse-process-output (output uid-packages)
   "Return a PID table parsed from OUTPUT using UID-PACKAGES."
@@ -124,9 +139,10 @@
   "Return package metadata for current device, optionally ALLOW-STALE."
   (when-let* ((metadata (gethash (elogcat--package-cache-key)
                                  elogcat--package-cache)))
-    (when (or allow-stale
-              (< (- (float-time) (plist-get metadata :time))
-                 elogcat-package-cache-ttl))
+    (when (and (plist-member metadata :third-party-packages)
+               (or allow-stale
+                   (< (- (float-time) (plist-get metadata :time))
+                      elogcat-package-cache-ttl)))
       metadata)))
 
 (defun elogcat--finish-package-query (process output-buffer)

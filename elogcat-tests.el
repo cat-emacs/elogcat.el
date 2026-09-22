@@ -784,6 +784,39 @@
      (should (equal (elogcat--adb-command "shell" "ps")
                     '("adb" "-s" "SER1" "shell" "ps"))))))
 
+(ert-deftest elogcat-package-cache-separates-third-party-candidates ()
+  "Package metadata retains all UIDs but exposes only third-party choices."
+  (let ((metadata
+         (elogcat--parse-package-output
+          (concat "package:com.android.systemui uid:10002\n"
+                  "package:com.example.app uid:10123\n"
+                  "===ELOGCAT_THIRD_PARTY===\n"
+                  "package:com.example.app\n"))))
+    (should (equal (sort (plist-get metadata :packages) #'string<)
+                   '("com.android.systemui" "com.example.app")))
+    (should (equal (plist-get metadata :third-party-packages)
+                   '("com.example.app")))
+    (should (equal (gethash "10002" (plist-get metadata :uids))
+                   '("com.android.systemui")))))
+
+(ert-deftest elogcat-mine-selector-offers-only-third-party-packages ()
+  "Manual Mine selection excludes system and merely observed packages."
+  (elogcat-tests--with-buffer
+   (let ((system-record (elogcat-tests--query-record))
+         candidates)
+     (setf (elogcat-record-application-ids system-record)
+           '("com.android.systemui"))
+     (setq elogcat--records (list system-record))
+     (cl-letf (((symbol-function 'completing-read)
+                (lambda (_prompt collection &rest _)
+                  (setq candidates collection)
+                  (car collection)))
+               ((symbol-function 'elogcat--set-mine) #'ignore))
+       (elogcat--select-mine-from-metadata
+        '(:packages ("com.android.systemui" "com.example.app")
+          :third-party-packages ("com.example.app"))))
+     (should (equal candidates '("com.example.app"))))))
+
 (ert-deftest elogcat-package-cache-parses-uid-metadata ()
   "Installed package metadata is reusable independently of process output."
   (let ((metadata (elogcat--parse-package-output

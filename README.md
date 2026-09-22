@@ -24,8 +24,10 @@ android-mode can resolve the project through its public API, the application
 IDs of all selected module targets are used automatically. Mine follows later
 asynchronous project-model refreshes. Otherwise Mine is marked as unresolved
 and the query temporarily shows all logs instead of an empty view; press `P` to
-replace the project set with one manually selected application. Package/process
-metadata is resolved client-side and follows app
+replace the project set with one manually selected third-party application.
+The selector uses Android's user-installed (`-3`) package list; full system and
+user package metadata remains available internally for PID/UID attribution.
+Package/process metadata is resolved client-side and follows app
 restarts and remote processes such as `com.example.app:worker`. Clear the `/`
 query to inspect all collected messages. Error, Fatal, and Assert messages
 emitted by proxy processes such as `AndroidRuntime` are retained when their

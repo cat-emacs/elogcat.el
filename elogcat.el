@@ -1154,13 +1154,12 @@ With AUTOMATIC non-nil, keep following Android project model updates."
 (defun elogcat--select-mine-from-metadata (metadata)
   "Prompt for Mine using package METADATA."
   (when (derived-mode-p 'elogcat-mode)
-    (let* ((observed (cl-loop for record in elogcat--records
-                              append (elogcat-record-application-ids record)))
-           (packages (delete-dups
-                      (append observed (plist-get metadata :packages))))
-           (package (completing-read "Project application ID: " packages
-                                     nil nil nil nil
-                                     (car (elogcat--mine-packages)))))
+    (let* ((packages (plist-get metadata :third-party-packages))
+           (package (if packages
+                        (completing-read "Third-party application ID: "
+                                         packages nil t nil nil
+                                         (car (elogcat--mine-packages)))
+                      (user-error "No third-party applications are installed"))))
       (elogcat--set-mine package))))
 
 (defun elogcat-select-mine ()
