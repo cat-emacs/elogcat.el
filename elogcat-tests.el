@@ -93,6 +93,31 @@
    (should (elogcat--record-matches-p
             (elogcat-tests--query-record)))))
 
+(ert-deftest elogcat-unresolved-mine-is-ignored-in-query-logic ()
+  "Unresolved Mine shows all alone and leaves other query terms effective."
+  (elogcat-tests--with-buffer
+   (setq elogcat-package-filter nil)
+   (let ((record (elogcat-tests--query-record)))
+     (should (elogcat-tests--query-matches "package:mine" record))
+     (should (elogcat-tests--query-matches "-package:mine" record))
+     (should (elogcat-tests--query-matches
+              "package:mine & tag:DemoTag" record))
+     (should-not (elogcat-tests--query-matches
+                  "package:mine & tag:Other" record))
+     (should-not (elogcat-tests--query-matches
+                  "package:mine | tag:Other" record)))))
+
+(ert-deftest elogcat-project-package-uses-public-android-api ()
+  "The default project resolver consumes only android-mode's public API."
+  (let (called)
+    (cl-letf (((symbol-function 'android-current-application-id)
+               (lambda (&optional _prompt _file _root)
+                 (setq called t)
+                 "com.example.app")))
+      (should (equal (elogcat--android-mode-project-package)
+                     "com.example.app"))
+      (should called))))
+
 (ert-deftest elogcat-package-mine-keeps-system-and-assert-crash-messages ()
   "System markers and Assert proxy crashes survive package:mine queries."
   (elogcat-tests--with-buffer

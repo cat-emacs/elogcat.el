@@ -298,35 +298,55 @@
         (t (error "Invalid is filter: %s" value))))
       (_ nil))))
 
-(defun elogcat--query-term-match-p (term record)
-  "Return non-nil when query TERM matches RECORD."
-  (let* ((field (elogcat-query-term-field term))
-         (value (elogcat-query-term-value term))
-         (matched
-          (if (memq field '(level age is name))
-              (elogcat--query-special-match-p term record)
-            (if (and (eq field 'package) (equal value "mine"))
-                (and elogcat-package-filter
-                     (elogcat--package-matches-p record))
-              (seq-some
-               (lambda (field-value)
-                 (elogcat--query-string-match-p
-                  (elogcat-query-term-operator term) value field-value))
-               (elogcat--query-field-values field record))))))
-    (if (elogcat-query-term-negated term) (not matched) matched)))
+(defconst elogcat--query-unresolved :elogcat-query-unresolved
+  "Internal result for a filter term whose dynamic value is unavailable.")
 
-(defun elogcat--query-ast-match-p (ast record)
-  "Return non-nil when AST matches RECORD."
+(defun elogcat--query-term-match-p (term record)
+  "Return whether query TERM matches RECORD, or an unresolved marker."
+  (let* ((field (elogcat-query-term-field term))
+         (value (elogcat-query-term-value term)))
+    (if (and (eq field 'package) (equal value "mine")
+             (null elogcat-package-filter))
+        elogcat--query-unresolved
+      (let ((matched
+             (if (memq field '(level age is name))
+                 (elogcat--query-special-match-p term record)
+               (if (and (eq field 'package) (equal value "mine"))
+                   (elogcat--package-matches-p record)
+                 (seq-some
+                  (lambda (field-value)
+                    (elogcat--query-string-match-p
+                     (elogcat-query-term-operator term) value field-value))
+                  (elogcat--query-field-values field record))))))
+        (if (elogcat-query-term-negated term) (not matched) matched)))))
+
+(defun elogcat--query-node-results (ast record)
+  "Return resolved child results for AST against RECORD."
+  (delq elogcat--query-unresolved
+        (mapcar (lambda (node) (elogcat--query-ast-result node record))
+                (cdr ast))))
+
+(defun elogcat--query-ast-result (ast record)
+  "Return AST match result for RECORD, preserving unresolved terms."
   (if (eq ast 'true)
       t
     (pcase (car-safe ast)
-      ('and (seq-every-p (lambda (node)
-                           (elogcat--query-ast-match-p node record))
-                         (cdr ast)))
-      ('or (seq-some (lambda (node)
-                       (elogcat--query-ast-match-p node record))
-                     (cdr ast)))
+      ('and
+       (let ((results (elogcat--query-node-results ast record)))
+         (if results (seq-every-p #'identity results)
+           elogcat--query-unresolved)))
+      ('or
+       (let ((results (elogcat--query-node-results ast record)))
+         (if results (seq-some #'identity results)
+           elogcat--query-unresolved)))
       (_ (elogcat--query-term-match-p ast record)))))
+
+(defun elogcat--query-ast-match-p (ast record)
+  "Return non-nil when AST matches RECORD.
+Dynamic terms that cannot be resolved are ignored; a wholly unresolved query
+matches so the default `package:mine' view remains useful."
+  (let ((result (elogcat--query-ast-result ast record)))
+    (or (eq result elogcat--query-unresolved) result)))
 
 (defun elogcat--query-validate-term (term)
   "Validate query TERM or signal an error."

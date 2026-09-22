@@ -37,6 +37,10 @@
 (require 'elogcat-process)
 
 ;;;; Declarations
+
+(declare-function android-current-application-id "android-mode"
+                  (&optional prompt file project-root))
+
 (defface elogcat-verbose-face '((t (:inherit default)))
   "Font Lock face used to highlight VERBOSE log records."
   :group 'elogcat)
@@ -104,7 +108,7 @@ The default matches Android Studio.  Set this to nil to show all messages."
   #'elogcat--android-mode-project-package
   "Function returning the application ID represented by `package:mine'.
 It is called in the buffer from which `elogcat' starts.  The default uses
-android-mode's current module and variant when available."
+`android-current-application-id' when `android-mode' provides it."
   :group 'elogcat
   :type '(choice (const :tag "Do not resolve automatically" nil) function))
 
@@ -160,7 +164,9 @@ android-mode's current module and variant when available."
    " " (propertize "Device:" 'face 'bold)
    " " (or elogcat-device-name elogcat-device-serial "discovering")
    "    " (propertize "Mine:" 'face 'bold)
-   " " (or elogcat-package-filter "not selected")
+   " " (if elogcat-package-filter
+           elogcat-package-filter
+         (propertize "unresolved (ignored; P to select)" 'face 'warning))
    "    " (propertize "Filter:" 'face 'bold)
    " " (or elogcat-query-filter "all messages")
    (when elogcat-query-error
@@ -1000,32 +1006,8 @@ Only lines at or above this level will be displayed."
 
 (defun elogcat--android-mode-project-package ()
   "Return android-mode's application ID for the current project context."
-  (when (and (fboundp 'android-root)
-             (fboundp 'android--flavor-appid))
-    (when-let* ((root (ignore-errors (android-root))))
-      (or
-       (when (boundp 'android--selected-targets)
-         (when-let* ((target (cdr (assoc root android--selected-targets))))
-           (ignore-errors
-             (android--flavor-appid (car target) (cdr target)))))
-       (when (and buffer-file-name
-                  (fboundp 'android--target-for-source-file))
-         (when-let* ((entry (ignore-errors
-                              (android--target-for-source-file
-                               buffer-file-name root))))
-           (plist-get entry :application-id)))
-       (when (fboundp 'android--get-flavors)
-         (let ((application-ids
-                (delete-dups
-                 (delq nil
-                       (mapcar (lambda (entry)
-                                 (and (listp entry)
-                                      (plist-get entry :application-id)))
-                               (ignore-errors
-                                 (let ((default-directory root))
-                                   (android--get-flavors))))))))
-           (and (= (length application-ids) 1)
-                (car application-ids))))))))
+  (when (fboundp 'android-current-application-id)
+    (ignore-errors (android-current-application-id))))
 
 (defun elogcat--set-mine (package)
   "Set PACKAGE as the application represented by `package:mine'."
@@ -1125,6 +1107,11 @@ requests complete available history."
                   (elogcat-default-tail
                    (list "-T" (number-to-string elogcat-default-tail)))
                   (t nil)))
+      (when (and new-session
+                 (null elogcat-package-filter)
+                 (equal elogcat-query-filter "package:mine"))
+        (message
+         "elogcat: package:mine unresolved; showing all logs (press P to select)"))
       (elogcat--rebuild-package-message-cache)
       (unless (process-live-p elogcat--stream-process)
         (if elogcat-device-serial

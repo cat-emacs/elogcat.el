@@ -1,6 +1,6 @@
 # elogcat.el [![MELPA](http://melpa.org/packages/elogcat-badge.svg)](http://melpa.org/#/elogcat)
 
-logcat interface for Emacs based on [android-mode](https://github.com/remvee/android-mode).
+logcat interface for Emacs with optional [android-mode](https://github.com/remvee/android-mode) project integration.
 
 `elogcat-mode` is a read-only major mode derived from `special-mode`. It keeps a
 bounded, structured backlog of `adb logcat -v threadtime` records. Filters and
@@ -20,9 +20,11 @@ filters keep stack traces together. Error/Fatal/Assert headers and stack frames
 can be browsed as one wrapping occurrence sequence.
 
 `elogcat` starts with Android Studio's default `package:mine` query. When
-android-mode knows the current module and variant, its application ID is used
-automatically; otherwise press `P` to select the application represented by
-`mine`. Package/process metadata is resolved client-side and follows app
+android-mode can resolve the current target through its public API, that
+target's application ID is used automatically. Otherwise Mine is marked as
+unresolved and the query temporarily shows all logs instead of an empty view;
+press `P` to select the application represented by `mine`. Package/process
+metadata is resolved client-side and follows app
 restarts and remote processes such as `com.example.app:worker`. Clear the `/`
 query to inspect all collected messages. Error, Fatal, and Assert messages
 emitted by proxy processes such as `AndroidRuntime` are retained when their
