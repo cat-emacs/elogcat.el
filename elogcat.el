@@ -4,7 +4,7 @@
 
 ;; Author: Youngjoo Lee <youngker@gmail.com>
 ;; Maintainer: Misaka <chuxubank@qq.com>
-;; Version: 0.3.0
+;; Version: 1.0.0
 ;; Keywords: tools
 ;; Package-Requires: ((s "1.9.0") (dash "2.10.0") (transient "0.3.0"))
 
