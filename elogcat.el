@@ -92,6 +92,25 @@ The backlog enables filtering and formatting without restarting adb."
   :group 'elogcat
   :type 'boolean)
 
+(defcustom elogcat-default-query "package:mine"
+  "Structured query used when a new Logcat session starts.
+The default matches Android Studio.  Set this to nil to show all messages."
+  :group 'elogcat
+  :type '(choice (const :tag "Show all messages" nil) string))
+
+(defcustom elogcat-project-package-function
+  #'elogcat--android-mode-project-package
+  "Function returning the application ID represented by `package:mine'.
+It is called in the buffer from which `elogcat' starts.  The default uses
+android-mode's current module and variant when available."
+  :group 'elogcat
+  :type '(choice (const :tag "Do not resolve automatically" nil) function))
+
+(defcustom elogcat-show-key-hints t
+  "Whether the Logcat header shows common key bindings."
+  :group 'elogcat
+  :type 'boolean)
+
 (defvar-local elogcat-include-filter-regexp nil)
 (defvar-local elogcat-exclude-filter-regexp nil)
 (defvar-local elogcat-min-level "V"
@@ -111,12 +130,16 @@ The backlog enables filtering and formatting without restarting adb."
   :risky t
   :package-version '(elogcat . "0.2.0"))
 
-(defun elogcat-get-log-buffer-status (buffer)
-  "Get a log buffer status by BUFFER."
-  (let ((end (if (string= buffer "kernel") "" "|")))
-    (if (s-contains? buffer elogcat-logcat-command)
-        (concat (s-word-initials buffer) end)
-      (concat "-" end))))
+(defun elogcat--make-header-line ()
+  "Return a concise Android Studio-style Logcat header."
+  (concat
+   " " (propertize "Mine:" 'face 'bold)
+   " " (or elogcat-package-filter "not selected")
+   "    " (propertize "Filter:" 'face 'bold)
+   " " (or elogcat-query-filter "all messages")
+   (when elogcat-show-key-hints
+     (propertize "    / filter   l level   P mine   SPC pause   ? keys"
+                 'face 'shadow))))
 
 (defun elogcat--at-tail-p ()
   "Return non-nil when the current buffer is displayed at its tail."
@@ -127,20 +150,16 @@ The backlog enables filtering and formatting without restarting adb."
       (>= (point) tail))))
 
 (defun elogcat-make-status (&optional _status)
-  "Get a log buffer status for use in the mode line."
-  (format " elogcat[%s]%s<%s> %s%s%s%s"
-          (mapconcat #'elogcat-get-log-buffer-status
-                     '("main" "system" "radio" "events" "crash" "kernel") "")
-          (if elogcat-package-filter
-              (format "(%s)" elogcat-package-filter)
-            "")
-          elogcat-min-level
+  "Return concise stream state for use in the mode line."
+  (format " elogcat %s · %s%s%s"
           (if elogcat-paused
               "PAUSED"
             (if (and elogcat-follow-tail (elogcat--at-tail-p)) "LIVE" "HOLD"))
-          (if truncate-lines "" " WRAP")
-          (if elogcat-query-filter " QUERY" "")
-          (if elogcat-query-match-case " CASE" "")))
+          (if (equal elogcat-min-level "V")
+              "ALL"
+            (concat elogcat-min-level "+"))
+          (if truncate-lines "" " · WRAP")
+          (if elogcat-query-match-case " · CASE" "")))
 
 (defun elogcat-erase-buffer ()
   "Clear elogcat buffer."
@@ -297,8 +316,7 @@ Only lines at or above this level will be displayed."
            (level (elogcat-record-level record))
            (minimum (or (cl-position elogcat-min-level elogcat-level-priority
                                      :test #'string=) 0)))
-      (and (elogcat--package-matches-p record)
-           (elogcat--query-matches-p record)
+      (and (elogcat--query-matches-p record)
            (or (null level)
                (>= (or (cl-position level elogcat-level-priority
                                     :test #'string=) 0)
@@ -385,7 +403,7 @@ Only lines at or above this level will be displayed."
 
 (defun elogcat--render-backlog (&optional force-tail)
   "Redraw from the backlog; with FORCE-TAIL, move followed windows to the end."
-  (when (bound-and-true-p elogcat-mode)
+  (when (derived-mode-p 'elogcat-mode)
     (let* ((buffer-read-only nil)
            (inhibit-redisplay t)
            (windows (get-buffer-window-list (current-buffer) nil t))
@@ -581,46 +599,47 @@ Only lines at or above this level will be displayed."
 (unless elogcat-mode-map
   (setq elogcat-mode-map (make-sparse-keymap)))
 
-(--each '(("C" . elogcat-erase-buffer)
-          ("SPC" . elogcat-toggle-pause)
-          ("f" . elogcat-toggle-follow-tail)
-          ("W" . elogcat-toggle-soft-wrap)
-          ("n" . elogcat-next-occurrence)
-          ("p" . elogcat-previous-occurrence)
+(dolist (key '("C" "W" "i" "x" "I" "X" "L" "S" "F"
+               "m" "s" "r" "e" "c" "k"))
+  (define-key elogcat-mode-map (kbd key) nil))
+
+(--each '(("SPC" . elogcat-toggle-pause)
           ("/" . elogcat-set-query-filter)
-          ("M-c" . elogcat-toggle-query-match-case)
-          ("i" . elogcat-set-include-filter)
-          ("x" . elogcat-set-exclude-filter)
-          ("I" . elogcat-clear-include-filter)
-          ("X" . elogcat-clear-exclude-filter)
-          ("L" . elogcat-set-level)
-          ("P" . elogcat-toggle-package)
-          ("S" . elogcat-save-buffer)
+          ("?" . describe-mode)
+          ("c" . elogcat-erase-buffer)
+          ("f" . elogcat-toggle-follow-tail)
           ("g" . elogcat-show-status)
-          ("F" . occur)
+          ("l" . elogcat-set-level)
+          ("n" . elogcat-next-occurrence)
+          ("o" . occur)
+          ("p" . elogcat-previous-occurrence)
           ("q" . elogcat-exit)
-          ("m" . elogcat-toggle-main)
-          ("s" . elogcat-toggle-system)
-          ("r" . elogcat-toggle-radio)
-          ("e" . elogcat-toggle-events)
-          ("c" . elogcat-toggle-crash)
-          ("k" . elogcat-toggle-kernel))
+          ("s" . elogcat-save-buffer)
+          ("w" . elogcat-toggle-soft-wrap)
+          ("M-c" . elogcat-toggle-query-match-case)
+          ("P" . elogcat-select-mine))
   (define-key elogcat-mode-map (read-kbd-macro (car it)) (cdr it)))
 
-(define-minor-mode elogcat-mode
-  "Minor mode for browsing a structured Android Logcat stream."
-  :lighter elogcat-mode-line
-  :keymap elogcat-mode-map
-  (when elogcat-mode
-    (setq-local truncate-lines (not elogcat-soft-wrap)
-                elogcat-paused nil
-                elogcat-follow-tail t
-                elogcat--redraw-function #'elogcat--redraw-unless-paused
-                elogcat--process-table (make-hash-table :test #'equal)
-                elogcat--unresolved-records nil
-                elogcat--package-message-cache (make-hash-table :test #'eq))
-    (add-hook 'kill-buffer-hook #'elogcat--stop-process-monitor nil t)
-    (buffer-disable-undo)))
+(define-key elogcat-mode-map [remap next-line] #'elogcat-next-occurrence)
+(define-key elogcat-mode-map [remap previous-line] #'elogcat-previous-occurrence)
+
+(define-derived-mode elogcat-mode special-mode "Logcat"
+  "Major mode for browsing a structured Android Logcat stream."
+  (setq-local truncate-lines (not elogcat-soft-wrap)
+              header-line-format '(:eval (elogcat--make-header-line))
+              mode-line-process elogcat-mode-line
+              elogcat-paused nil
+              elogcat-follow-tail t
+              elogcat-query-filter elogcat-default-query
+              elogcat--query-predicate
+              (and elogcat-default-query
+                   (elogcat--query-compile elogcat-default-query))
+              elogcat--redraw-function #'elogcat--redraw-unless-paused
+              elogcat--process-table (make-hash-table :test #'equal)
+              elogcat--unresolved-records nil
+              elogcat--package-message-cache (make-hash-table :test #'eq))
+  (add-hook 'kill-buffer-hook #'elogcat--stop-process-monitor nil t)
+  (buffer-disable-undo))
 
 (defun elogcat-exit ()
   "Exit elogcat."
@@ -632,34 +651,67 @@ Only lines at or above this level will be displayed."
       (sleep-for 0.1))
     (kill-buffer buf)))
 
-(defun elogcat-toggle-package (package)
-  "Toggle local structured filtering by Android application PACKAGE.
-The Logcat process and retained backlog are not restarted or cleared."
+(defun elogcat--android-mode-project-package ()
+  "Return android-mode's application ID for the current project context."
+  (when (and (fboundp 'android-root)
+             (fboundp 'android--flavor-appid))
+    (when-let* ((root (ignore-errors (android-root))))
+      (or
+       (when (boundp 'android--selected-targets)
+         (when-let* ((target (cdr (assoc root android--selected-targets))))
+           (ignore-errors
+             (android--flavor-appid (car target) (cdr target)))))
+       (when (and buffer-file-name
+                  (fboundp 'android--target-for-source-file))
+         (when-let* ((entry (ignore-errors
+                              (android--target-for-source-file
+                               buffer-file-name root))))
+           (plist-get entry :application-id)))
+       (when (fboundp 'android--get-flavors)
+         (let ((application-ids
+                (delete-dups
+                 (delq nil
+                       (mapcar (lambda (entry)
+                                 (and (listp entry)
+                                      (plist-get entry :application-id)))
+                               (ignore-errors
+                                 (let ((default-directory root))
+                                   (android--get-flavors))))))))
+           (and (= (length application-ids) 1)
+                (car application-ids))))))))
+
+(defun elogcat-select-mine (package)
+  "Set PACKAGE as the application ID represented by `package:mine'.
+This updates retained records without restarting the Logcat stream."
   (interactive
    (list (completing-read
-          "Filter package (select current package again to clear): "
-          (mapcar (lambda (name)
-                    (s-chop-prefix "package:" name))
-                  (split-string
-                   (string-trim
-                    (shell-command-to-string
-                     "adb shell pm list packages -3"))
-                   "\n" t))
+          "Project application ID: "
+          (delete-dups
+           (append
+            (cl-loop for record in elogcat--records
+                     append (elogcat-record-application-ids record))
+            (mapcar (lambda (name) (s-chop-prefix "package:" name))
+                    (split-string
+                     (string-trim
+                      (shell-command-to-string
+                       "adb shell pm list packages -3"))
+                     "\n" t))))
           nil nil nil nil elogcat-package-filter)))
-  (setq elogcat-package-filter
-        (unless (or (string-empty-p package)
-                    (equal package elogcat-package-filter))
-          package))
+  (setq elogcat-package-filter (unless (string-empty-p package) package))
   (elogcat--rebuild-package-message-cache)
   (elogcat--refresh-process-table)
   (elogcat--redraw-unless-paused)
-  (message "elogcat: package filter %s"
-           (or elogcat-package-filter "cleared")))
+  (message "elogcat: package:mine is %s"
+           (or elogcat-package-filter "not selected")))
+
+(defalias 'elogcat-toggle-package #'elogcat-select-mine)
 
 (defun elogcat-stop ()
   "Stop the adb Logcat process and package process monitor."
-  (when (bound-and-true-p elogcat-mode)
-    (elogcat--stop-process-monitor))
+  (when-let* ((buffer (get-buffer elogcat-buffer)))
+    (with-current-buffer buffer
+      (when (derived-mode-p 'elogcat-mode)
+        (elogcat--stop-process-monitor))))
   (-when-let (proc (get-process "elogcat"))
     (delete-process proc)))
 
@@ -671,7 +723,21 @@ With numeric prefix N, show the last N lines then stream.
 With bare \\[universal-argument], replay full ring buffer history."
   (interactive "P")
   (unless (get-process "elogcat")
-    (let* ((tail-arg (cond
+    (let* ((session-state
+            (when (derived-mode-p 'elogcat-mode)
+              (list :package elogcat-package-filter
+                    :query elogcat-query-filter
+                    :level elogcat-min-level
+                    :match-case elogcat-query-match-case
+                    :include elogcat-include-filter-regexp
+                    :exclude elogcat-exclude-filter-regexp
+                    :follow elogcat-follow-tail
+                    :truncate truncate-lines)))
+           (project-package
+            (or (plist-get session-state :package)
+                (and elogcat-project-package-function
+                     (funcall elogcat-project-package-function))))
+           (tail-arg (cond
                       ((consp arg) "")
                       (arg (format " -T %d" (prefix-numeric-value arg)))
                       (elogcat-default-tail
@@ -687,8 +753,20 @@ With bare \\[universal-argument], replay full ring buffer history."
       (set-process-filter proc #'elogcat-process-filter)
       (set-process-sentinel proc #'elogcat-process-sentinel)
       (with-current-buffer elogcat-buffer
-        (elogcat-mode t)
-        (setq buffer-read-only t)
+        (elogcat-mode)
+        (when session-state
+          (setq elogcat-query-filter (plist-get session-state :query)
+                elogcat-min-level (plist-get session-state :level)
+                elogcat-query-match-case (plist-get session-state :match-case)
+                elogcat-include-filter-regexp (plist-get session-state :include)
+                elogcat-exclude-filter-regexp (plist-get session-state :exclude)
+                elogcat-follow-tail (plist-get session-state :follow)
+                truncate-lines (plist-get session-state :truncate)
+                elogcat--query-predicate
+                (and elogcat-query-filter
+                     (elogcat--query-compile elogcat-query-filter))))
+        (setq elogcat-package-filter project-package)
+        (elogcat--rebuild-package-message-cache)
         (font-lock-mode -1)
         (elogcat--start-process-monitor))
       (switch-to-buffer elogcat-buffer)

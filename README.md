@@ -2,23 +2,25 @@
 
 logcat interface for Emacs based on [android-mode](https://github.com/remvee/android-mode).
 
-`elogcat` keeps a bounded, structured backlog of `adb logcat -v threadtime`
-records. Filters and minimum levels are applied to the retained backlog
-immediately, without restarting adb. Pausing only stops rendering: incoming
-messages remain available when the stream resumes. The mode line reports
-`LIVE`, `HOLD`, or `PAUSED`, plus `WRAP` when soft wrapping is enabled.
+`elogcat-mode` is a read-only major mode derived from `special-mode`. It keeps a
+bounded, structured backlog of `adb logcat -v threadtime` records. Filters and
+minimum levels are applied to the retained backlog immediately, without
+restarting adb. Pausing only stops rendering: incoming messages remain
+available when the stream resumes. The mode line reports `LIVE`, `HOLD`, or
+`PAUSED`, plus `WRAP` when soft wrapping is enabled.
 
 Multi-line exceptions retain their header metadata, so tag, PID, and level
 filters keep stack traces together. Error/Fatal/Assert headers and stack frames
 can be browsed as one wrapping occurrence sequence.
 
-Package filtering follows Android Studio's client-side model. `P` selects an
-installed package without restarting adb or clearing the backlog. `elogcat`
-periodically associates package UIDs with running PIDs and process names, so
-filters follow app restarts and include remote processes such as
-`com.example.app:worker`. Error, Fatal, and Assert messages emitted by proxy
-processes such as `AndroidRuntime` are retained when their complete message
-mentions the selected package.
+`elogcat` starts with Android Studio's default `package:mine` query. When
+android-mode knows the current module and variant, its application ID is used
+automatically; otherwise press `P` to select the application represented by
+`mine`. Package/process metadata is resolved client-side and follows app
+restarts and remote processes such as `com.example.app:worker`. Clear the `/`
+query to inspect all collected messages. Error, Fatal, and Assert messages
+emitted by proxy processes such as `AndroidRuntime` are retained when their
+complete message mentions the selected application.
 
 Press `/` to enter an Android Studio compatible filter expression. Supported
 fields are `tag:`, `package:`, `process:`, `message:`, and `line:`. Bare terms
@@ -80,27 +82,28 @@ Key bindings
 
 Key | Function
 --- | --------
-<kbd>SPC</kbd> | Pause/resume rendering (messages continue entering the backlog)
+<kbd>SPC</kbd> | Pause/resume rendering while continuing to collect messages
+<kbd>/</kbd> | Set or clear an Android Studio-compatible filter query
+<kbd>l</kbd> | Select the minimum visible log level
+<kbd>P</kbd> | Select the application represented by `package:mine`
 <kbd>f</kbd> | Toggle follow-tail (`LIVE`/`HOLD`)
-<kbd>W</kbd> | Toggle soft wrapping
+<kbd>w</kbd> | Toggle soft wrapping
 <kbd>n</kbd> / <kbd>p</kbd> | Next/previous Error, Fatal, Assert, or stack frame
-<kbd>C</kbd> | Clear the device log and local backlog
-<kbd>/</kbd> | Set or clear an Android Studio compatible filter expression
-<kbd>M-c</kbd> | Toggle case-sensitive structured query matching
-<kbd>i</kbd> / <kbd>x</kbd> | Set include/exclude regexp and redraw immediately
-<kbd>I</kbd> / <kbd>X</kbd> | Clear include/exclude regexp
-<kbd>L</kbd> | Set minimum log level and redraw immediately
-<kbd>P</kbd> | Toggle local structured filtering by an installed package
-<kbd>g</kbd> | Show stream and filter status
-<kbd>F</kbd> | Run `occur`
-<kbd>S</kbd> | Save the buffer and stop Logcat
+<kbd>c</kbd> | Clear the device log and local backlog
+<kbd>o</kbd> | Run `occur`
+<kbd>s</kbd> | Save the buffer and stop Logcat
+<kbd>g</kbd> | Show detailed stream and filter status
+<kbd>M-c</kbd> | Toggle case-sensitive query matching
+<kbd>?</kbd> | Describe the mode and show all bindings
 <kbd>q</kbd> | Stop Logcat and close the buffer
-<kbd>m</kbd> | Toggle the `main` ring buffer
-<kbd>s</kbd> | Toggle the `system` ring buffer
-<kbd>r</kbd> | Toggle the `radio` ring buffer
-<kbd>e</kbd> | Toggle the `events` ring buffer
-<kbd>c</kbd> | Toggle the `crash` ring buffer
-<kbd>k</kbd> | Toggle the `kernel` ring buffer
+
+Legacy include/exclude regexp commands and ring-buffer toggle commands remain
+available through `M-x`, but structured `/` queries are the primary filtering
+interface. The stream collects Android's `main`, `system`, `radio`, `events`,
+`crash`, and `kernel` ring buffers so diagnostic messages remain available to
+those queries. Ring buffers are intentionally absent from the primary keymap
+and status UI, matching modern Android Studio's app-and-query-centered
+workflow.
 
 ## Configuration
 
@@ -108,7 +111,9 @@ Key | Function
 (setq elogcat-backlog-size (* 8 1024 1024) ; retained characters
       elogcat-soft-wrap t                   ; default for new buffers
       elogcat-default-tail 100              ; initial device history
-      elogcat-process-refresh-interval 2)    ; package/PID refresh seconds
+      elogcat-default-query "package:mine"   ; Android Studio default
+      elogcat-show-key-hints t                ; concise header shortcuts
+      elogcat-process-refresh-interval 2)     ; package/PID refresh seconds
 ```
 
 `elogcat-backlog-size` bounds the in-memory records and displayed output. Once
