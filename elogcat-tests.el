@@ -117,6 +117,18 @@
     (should (equal (elogcat-process-info-application-ids info)
                    '("com.example.app")))))
 
+(ert-deftest elogcat-process-refresh-redraws-structured-query ()
+  "Metadata arrival redraws package/process queries without a P filter."
+  (elogcat-tests--with-buffer
+   (let ((record (elogcat--parse-record elogcat-tests--debug))
+         redrawn)
+     (setq elogcat--records (list record)
+           elogcat--query-predicate (elogcat--query-compile "package:example")
+           elogcat--redraw-function (lambda () (setq redrawn t)))
+     (elogcat--update-process-table
+      (elogcat--parse-process-query elogcat-tests--process-query))
+     (should redrawn))))
+
 (ert-deftest elogcat-process-refresh-enriches-continuations ()
   "A delayed process mapping enriches headers and their continuation lines."
   (elogcat-tests--with-buffer
@@ -292,6 +304,54 @@
            :message-group (elogcat--new-message-group "level:nope"))))
      (should (elogcat-tests--query-matches "level:nope" record))
      (should-not (elogcat-tests--query-matches "age:bogus" record)))))
+
+(ert-deftest elogcat-query-completion-provides-static-context-values ()
+  "Query completion switches candidates based on the field at point."
+  (with-temp-buffer
+    (insert "lev")
+    (let ((capf (elogcat-query-completion-at-point)))
+      (should (member "level:" (nth 2 capf))))
+    (erase-buffer)
+    (insert "level:w")
+    (let ((capf (elogcat-query-completion-at-point)))
+      (should (= (nth 0 capf) (+ 2 (string-match ":" (buffer-string)))))
+      (should (member "warn" (nth 2 capf))))
+    (erase-buffer)
+    (insert "is:")
+    (should (member "stacktrace"
+                    (nth 2 (elogcat-query-completion-at-point))))
+    (erase-buffer)
+    (insert "age:")
+    (should (member "10m"
+                    (nth 2 (elogcat-query-completion-at-point))))))
+
+(ert-deftest elogcat-query-completion-uses-backlog-values ()
+  "Package, tag, and process candidates come from the current backlog."
+  (elogcat-tests--with-buffer
+   (setq elogcat--records (list (elogcat-tests--query-record)))
+   (let ((elogcat--query-completion-source-buffer (current-buffer)))
+     (with-temp-buffer
+       (let ((elogcat--query-completion-source-buffer
+              elogcat--query-completion-source-buffer))
+         (insert "package:")
+         (let ((candidates (nth 2 (elogcat-query-completion-at-point))))
+           (should (member "mine" candidates))
+           (should (member "com.example.app" candidates)))
+         (erase-buffer)
+         (insert "tag:")
+         (should (member "DemoTag"
+                         (nth 2 (elogcat-query-completion-at-point))))
+         (erase-buffer)
+         (insert "process:")
+         (should (member "com.example.app:worker"
+                         (nth 2 (elogcat-query-completion-at-point)))))))))
+
+(ert-deftest elogcat-query-minibuffer-binds-tab-to-capf ()
+  "The query minibuffer binds TAB directly to completion-at-point."
+  (with-temp-buffer
+    (elogcat--query-minibuffer-setup)
+    (should (eq (local-key-binding (kbd "TAB"))
+                #'completion-at-point))))
 
 (ert-deftest elogcat-query-command-redraws-without-restarting ()
   "Setting a query changes only the backlog projection."

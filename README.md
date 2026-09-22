@@ -44,6 +44,13 @@ Invalid expressions fall back to a case-insensitive whole-line text search,
 matching Android Studio's failure behavior. `M-c` toggles case-sensitive query
 matching.
 
+The `/` minibuffer provides context-sensitive completion through Emacs's
+standard completion-at-point API. Press `TAB` to complete filter keys and
+values. `level:`, `is:`, and `age:` use built-in candidates; `package:`, `tag:`,
+and `process:` also offer values observed in the current backlog. This works
+with standard completion and CAPF frontends such as Corfu. Minibuffer history
+remains available with `M-p` and `M-n`.
+
 ## ScreenShot
 
 - **elogcat**

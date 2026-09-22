@@ -1,6 +1,6 @@
 EMACS ?= emacs
 BATCH = $(EMACS) -Q --batch
-SOURCES = elogcat.el
+SOURCES = elogcat-core.el elogcat-filter.el elogcat-process.el elogcat.el
 TEST_DEPS_DIR ?= .test-deps
 PACKAGE_DIR = $(abspath $(TEST_DEPS_DIR)/elpa)
 
