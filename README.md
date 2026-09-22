@@ -1,6 +1,16 @@
 # elogcat.el [![MELPA](http://melpa.org/packages/elogcat-badge.svg)](http://melpa.org/#/elogcat)
 
-logcat interface for emacs based on [android-mode](https://github.com/remvee/android-mode)
+logcat interface for Emacs based on [android-mode](https://github.com/remvee/android-mode).
+
+`elogcat` keeps a bounded, structured backlog of `adb logcat -v threadtime`
+records. Filters and minimum levels are applied to the retained backlog
+immediately, without restarting adb. Pausing only stops rendering: incoming
+messages remain available when the stream resumes. The mode line reports
+`LIVE`, `HOLD`, or `PAUSED`, plus `WRAP` when soft wrapping is enabled.
+
+Multi-line exceptions retain their header metadata, so tag, PID, and level
+filters keep stack traces together. Error/Fatal headers and stack frames can be
+browsed as one wrapping occurrence sequence.
 
 ## ScreenShot
 
@@ -31,20 +41,36 @@ Key bindings
 
 Key | Function
 --- | --------
-<kbd>C</kbd> | elogcat-erase-buffer
-<kbd>i</kbd> | elogcat-set-include-filter
-<kbd>x</kbd> | elogcat-set-exclude-filter
-<kbd>I</kbd> | elogcat-clear-include-filter
-<kbd>X</kbd> | elogcat-clear-exclude-filter
-<kbd>g</kbd> | elogcat-show-status
-<kbd>F</kbd> | occur
-<kbd>q</kbd> | elogcat-exit
-<kbd>m</kbd> | elogcat-toggle-main
-<kbd>s</kbd> | elogcat-toggle-system
-<kbd>r</kbd> | elogcat-toggle-radio
-<kbd>e</kbd> | elogcat-toggle-events
-<kbd>c</kbd> | elogcat-toggle-crash
-<kbd>k</kbd> | elogcat-toggle-kernel
+<kbd>SPC</kbd> | Pause/resume rendering (messages continue entering the backlog)
+<kbd>f</kbd> | Toggle follow-tail (`LIVE`/`HOLD`)
+<kbd>W</kbd> | Toggle soft wrapping
+<kbd>n</kbd> / <kbd>p</kbd> | Next/previous Error, Fatal, or stack frame
+<kbd>C</kbd> | Clear the device log and local backlog
+<kbd>i</kbd> / <kbd>x</kbd> | Set include/exclude regexp and redraw immediately
+<kbd>I</kbd> / <kbd>X</kbd> | Clear include/exclude regexp
+<kbd>L</kbd> | Set minimum log level and redraw immediately
+<kbd>P</kbd> | Filter by a running Android package
+<kbd>g</kbd> | Show stream and filter status
+<kbd>F</kbd> | Run `occur`
+<kbd>S</kbd> | Save the buffer and stop Logcat
+<kbd>q</kbd> | Stop Logcat and close the buffer
+<kbd>m</kbd> | Toggle the `main` ring buffer
+<kbd>s</kbd> | Toggle the `system` ring buffer
+<kbd>r</kbd> | Toggle the `radio` ring buffer
+<kbd>e</kbd> | Toggle the `events` ring buffer
+<kbd>c</kbd> | Toggle the `crash` ring buffer
+<kbd>k</kbd> | Toggle the `kernel` ring buffer
+
+## Configuration
+
+```elisp
+(setq elogcat-backlog-size (* 8 1024 1024) ; retained characters
+      elogcat-soft-wrap t                   ; default for new buffers
+      elogcat-default-tail 100)             ; initial device history
+```
+
+`elogcat-backlog-size` bounds the in-memory records and displayed output. Once
+the limit is exceeded, the oldest complete records are discarded.
 
 ## License
 

@@ -9,7 +9,7 @@ ARCHIVES = --eval "(setq package-user-dir \"$(PACKAGE_DIR)\")" \
 	--eval "(add-to-list 'package-archives '(\"melpa\" . \"https://melpa.org/packages/\") t)" \
 	--eval "(package-initialize)"
 
-.PHONY: all install-deps compile clean
+.PHONY: all install-deps compile test clean
 
 all: clean compile
 
@@ -23,6 +23,11 @@ compile:
 	$(BATCH) $(ARCHIVES) -L . \
 		--eval "(setq byte-compile-error-on-warn t)" \
 		-f batch-byte-compile $(SOURCES)
+
+test:
+	$(BATCH) $(ARCHIVES) -L . \
+		-l elogcat.el -l elogcat-tests.el \
+		-f ert-run-tests-batch-and-exit
 
 clean:
 	rm -f *.elc
