@@ -41,6 +41,10 @@
   "Application metadata for one Android process."
   application-ids process-name)
 
+(cl-defstruct elogcat-query-term
+  "One leaf in an Android Studio compatible filter expression."
+  field operator value negated)
+
 (defvar-local elogcat-pending-output ""
   "Incomplete adb output waiting for its terminating newline.")
 
@@ -76,6 +80,18 @@
 
 (defvar-local elogcat--package-message-cache nil
   "Message groups whose Error/Fatal/Assert text mentions the selected package.")
+
+(defvar-local elogcat-query-filter nil
+  "Android Studio compatible filter expression for this Logcat buffer.")
+
+(defvar-local elogcat--query-predicate nil
+  "Compiled predicate for `elogcat-query-filter'.")
+
+(defvar-local elogcat-query-match-case nil
+  "Non-nil when structured query matching is case-sensitive.")
+
+(defvar elogcat-query-filter-history nil
+  "History of Android Studio compatible Logcat filter expressions.")
 
 (defgroup elogcat nil
   "Interface with elogcat."
@@ -182,7 +198,7 @@ The backlog enables filtering and formatting without restarting adb."
 
 (defun elogcat-make-status (&optional _status)
   "Get a log buffer status for use in the mode line."
-  (format " elogcat[%s]%s<%s> %s%s"
+  (format " elogcat[%s]%s<%s> %s%s%s%s"
           (mapconcat #'elogcat-get-log-buffer-status
                      '("main" "system" "radio" "events" "crash" "kernel") "")
           (if elogcat-package-filter
@@ -192,7 +208,9 @@ The backlog enables filtering and formatting without restarting adb."
           (if elogcat-paused
               "PAUSED"
             (if (and elogcat-follow-tail (elogcat--at-tail-p)) "LIVE" "HOLD"))
-          (if truncate-lines "" " WRAP")))
+          (if truncate-lines "" " WRAP")
+          (if elogcat-query-filter " QUERY" "")
+          (if elogcat-query-match-case " CASE" "")))
 
 (defun elogcat-erase-buffer ()
   "Clear elogcat buffer."
@@ -244,8 +262,9 @@ The backlog enables filtering and formatting without restarting adb."
   "Show current Logcat state in the echo area."
   (interactive)
   (message
-   "elogcat: %s; package=%S (%d processes); include=%S; exclude=%S; level=%s; %d records"
+   "elogcat: %s; query=%S%s; package=%S (%d processes); include=%S; exclude=%S; level=%s; %d records"
    (if elogcat-paused "paused" (if elogcat-follow-tail "live" "hold"))
+   elogcat-query-filter (if elogcat-query-match-case " [case]" "")
    elogcat-package-filter
    (if (hash-table-p elogcat--process-table)
        (hash-table-count elogcat--process-table)
@@ -295,13 +314,18 @@ Only lines at or above this level will be displayed."
    (t uid)))
 
 (defun elogcat--packages-for-process (packages process-name)
-  "Disambiguate PACKAGES using PROCESS-NAME when possible."
-  (or (seq-filter
-       (lambda (package)
-         (or (equal process-name package)
-             (string-prefix-p (concat package ":") process-name)))
-       packages)
-      packages))
+  "Disambiguate PACKAGES using PROCESS-NAME without false shared-UID matches."
+  (let ((exact (member process-name packages))
+        (prefixed
+         (seq-filter
+          (lambda (package)
+            (string-prefix-p (concat package ":") process-name))
+          packages)))
+    (cond
+     (exact (list process-name))
+     (prefixed prefixed)
+     ((= (length packages) 1) packages)
+     (t nil))))
 
 (defun elogcat--parse-process-query (output)
   "Return a PID table parsed from process metadata OUTPUT."
@@ -417,6 +441,21 @@ Only lines at or above this level will be displayed."
           "\\([^:]*?\\) *: \\(.*\\)$")
   "Regexp for adb logcat's threadtime format.")
 
+(defun elogcat--new-message-group (message)
+  "Return a new message group initialized with MESSAGE."
+  (cons message nil))
+
+(defun elogcat--extend-message-group (group message)
+  "Append MESSAGE to GROUP's aggregate text and return GROUP."
+  (when group
+    (setcar group (concat (car group) "\n" message)))
+  group)
+
+(defun elogcat--message-text (record)
+  "Return RECORD's complete grouped message text."
+  (or (car-safe (elogcat-record-message-group record))
+      (elogcat-record-message record)))
+
 (defun elogcat--track-unresolved-record (record)
   "Queue RECORD for the next process metadata refresh when needed."
   (when (and (elogcat-record-pid record)
@@ -439,7 +478,8 @@ Only lines at or above this level will be displayed."
   (cond
    ((string-prefix-p "--------- beginning of " line)
     (make-elogcat-record
-     :raw line :message line :message-group (cons nil nil) :system-p t))
+     :raw line :message line :message-group (elogcat--new-message-group line)
+     :system-p t))
    ((string-match elogcat--threadtime-regexp line)
       (let ((record
              (make-elogcat-record
@@ -450,8 +490,10 @@ Only lines at or above this level will be displayed."
               :message (match-string 6 line))))
         (setf (elogcat-record-message-group record)
               (if (elogcat--same-message-header-p record previous)
-                  (elogcat-record-message-group previous)
-                (cons nil nil)))
+                  (elogcat--extend-message-group
+                   (elogcat-record-message-group previous)
+                   (elogcat-record-message record))
+                (elogcat--new-message-group (elogcat-record-message record))))
         (elogcat--apply-process-info record)
         (elogcat--track-unresolved-record record)))
    (t
@@ -465,8 +507,11 @@ Only lines at or above this level will be displayed."
       :tag (and previous (elogcat-record-tag previous))
       :application-ids (and previous (elogcat-record-application-ids previous))
       :process-name (and previous (elogcat-record-process-name previous))
-      :message-group (or (and previous (elogcat-record-message-group previous))
-                         (cons nil nil))
+      :message-group
+      (or (and previous
+               (elogcat--extend-message-group
+                (elogcat-record-message-group previous) line))
+          (elogcat--new-message-group line))
       :message line)))))
 
 (defun elogcat--record-filter-text (record)
@@ -482,6 +527,347 @@ Only lines at or above this level will be displayed."
                              (string-join (elogcat-record-application-ids record) " ")
                              (elogcat-record-message record)))
              " "))
+
+(defun elogcat--query-tokenize (query)
+  "Tokenize Android Studio filter QUERY."
+  (let ((index 0) (length (length query)) tokens)
+    (while (< index length)
+      (cond
+       ((memq (aref query index) '(?\s ?\t ?\n))
+        (cl-incf index))
+       ((memq (aref query index) '(?& ?| ?\( ?\)))
+        (push (pcase (aref query index)
+                (?& 'and) (?| 'or) (?\( 'lparen) (?\) 'rparen))
+              tokens)
+        (cl-incf index))
+       (t
+        (let (characters quote)
+          (while (and (< index length)
+                      (or quote
+                          (not (memq (aref query index)
+                                     '(?\s ?\t ?\n ?& ?| ?\( ?\))))))
+            (let ((character (aref query index)))
+              (cond
+               ((and (= character ?\\) (< (1+ index) length))
+                (let ((next (aref query (1+ index))))
+                  (if (or (and quote (memq next (list quote ?\\)))
+                          (and (null quote)
+                               (memq next
+                                     '(?\s ?\t ?& ?| ?\( ?\) ?\\ ?' ?\"))))
+                      (push next characters)
+                    (push character characters)
+                    (push next characters))
+                  (cl-incf index 2)))
+               ((memq character '(?' ?\"))
+                (cond ((null quote) (setq quote character))
+                      ((= quote character) (setq quote nil))
+                      (t (push character characters)))
+                (cl-incf index))
+               (t (push character characters) (cl-incf index)))))
+          (when quote (error "Unterminated quote"))
+          (push (apply #'string (nreverse characters)) tokens)))))
+    (nreverse tokens)))
+
+(defconst elogcat--query-fields
+  '("tag" "package" "process" "message" "line")
+  "Field names supported by Android Studio Logcat filters.")
+
+(defun elogcat--query-normalize-tokens (tokens)
+  "Merge separated field keys and values in TOKENS."
+  (let (normalized)
+    (while tokens
+      (let ((token (pop tokens)))
+        (if (and (stringp token)
+                 (string-match-p "\\(?:~\\|=\\)?:\\'" token)
+                 (stringp (car tokens)))
+            (push (concat token (pop tokens)) normalized)
+          (push token normalized))))
+    (nreverse normalized)))
+
+(defun elogcat--query-level (value)
+  "Return the priority letter represented by VALUE, or nil."
+  (cdr (assoc-string
+        (downcase value)
+        '(("verbose" . "V") ("v" . "V") ("debug" . "D") ("d" . "D")
+          ("info" . "I") ("i" . "I") ("warn" . "W") ("warning" . "W")
+          ("w" . "W") ("error" . "E") ("e" . "E") ("fatal" . "F")
+          ("f" . "F") ("assert" . "A") ("a" . "A")))))
+
+(defun elogcat--query-term (token)
+  "Parse TOKEN into an `elogcat-query-term'."
+  (unless (stringp token) (error "Expected filter term"))
+  (let ((case-fold-search nil))
+    (if (string-match
+         "\\`\\(-?\\)\\([[:alpha:]]+\\)\\(~\\|=\\)?:\\(.*\\)\\'" token)
+        (let* ((negated (not (string-empty-p (match-string 1 token))))
+               (field (downcase (match-string 2 token)))
+               (operator (pcase (match-string 3 token)
+                           ("~" 'regex) ("=" 'exact) (_ 'contains)))
+               (value (match-string 4 token)))
+          (unless (or (member field elogcat--query-fields)
+                      (member field '("level" "age" "is" "name")))
+            (error "Invalid filter field: %s" field))
+          (make-elogcat-query-term :field (intern field) :operator operator
+                                   :value value :negated negated))
+      (make-elogcat-query-term :field 'implicit :operator 'contains
+                               :value token :negated nil))))
+
+(defun elogcat--query-group-key (term index)
+  "Return implicit-OR grouping key for TERM at INDEX."
+  (let ((field (elogcat-query-term-field term)))
+    (cond
+     ((elogcat-query-term-negated term) (cons 'unique index))
+     ((eq field 'implicit) (cons 'unique index))
+     ((memq field '(tag package process message line level age is)) field)
+     (t (cons 'unique index)))))
+
+(defun elogcat--query-implicit-ast (tokens)
+  "Build Android Studio's implicit same-field OR tree from TOKENS."
+  (let ((groups nil) (index 0))
+    (dolist (token tokens)
+      (unless (stringp token) (error "Unexpected filter operator"))
+      (let* ((term (elogcat--query-term token))
+             (key (elogcat--query-group-key term index))
+             (entry (assq key groups)))
+        (if entry
+            (setcdr entry (append (cdr entry) (list term)))
+          (setq groups (append groups (list (list key term))))))
+      (cl-incf index))
+    (let ((nodes (mapcar (lambda (group)
+                           (let ((terms (cdr group)))
+                             (if (= (length terms) 1)
+                                 (car terms)
+                               (cons 'or terms))))
+                         groups)))
+      (if (= (length nodes) 1) (car nodes) (cons 'and nodes)))))
+
+(defvar elogcat--query-parser-tokens nil)
+
+(defun elogcat--query-parse-primary ()
+  "Parse one primary expression from `elogcat--query-parser-tokens'."
+  (let ((token (pop elogcat--query-parser-tokens)))
+    (cond
+     ((eq token 'lparen)
+      (if (eq (car elogcat--query-parser-tokens) 'rparen)
+          (progn (pop elogcat--query-parser-tokens) 'true)
+        (let ((expression (elogcat--query-parse-or)))
+          (unless (eq (pop elogcat--query-parser-tokens) 'rparen)
+            (error "Missing closing parenthesis"))
+          expression)))
+     ((stringp token) (elogcat--query-term token))
+     (t (error "Expected filter term")))))
+
+(defun elogcat--query-parse-and ()
+  "Parse an AND expression from `elogcat--query-parser-tokens'."
+  (let ((nodes (list (elogcat--query-parse-primary))))
+    (while (or (eq (car elogcat--query-parser-tokens) 'and)
+               (stringp (car elogcat--query-parser-tokens))
+               (eq (car elogcat--query-parser-tokens) 'lparen))
+      (when (eq (car elogcat--query-parser-tokens) 'and)
+        (pop elogcat--query-parser-tokens))
+      (push (elogcat--query-parse-primary) nodes))
+    (setq nodes (nreverse nodes))
+    (if (= (length nodes) 1) (car nodes) (cons 'and nodes))))
+
+(defun elogcat--query-parse-or ()
+  "Parse an OR expression from `elogcat--query-parser-tokens'."
+  (let ((nodes (list (elogcat--query-parse-and))))
+    (while (eq (car elogcat--query-parser-tokens) 'or)
+      (pop elogcat--query-parser-tokens)
+      (push (elogcat--query-parse-and) nodes))
+    (setq nodes (nreverse nodes))
+    (if (= (length nodes) 1) (car nodes) (cons 'or nodes))))
+
+(defun elogcat--query-parse (query)
+  "Return an AST for Android Studio filter QUERY."
+  (let* ((tokens (elogcat--query-normalize-tokens
+                  (elogcat--query-tokenize query)))
+         (explicit (seq-some (lambda (token)
+                               (memq token '(and or lparen rparen)))
+                             tokens)))
+    (if (null tokens)
+        nil
+      (if (not explicit)
+          (elogcat--query-implicit-ast tokens)
+        (let ((elogcat--query-parser-tokens tokens))
+          (prog1 (elogcat--query-parse-or)
+            (when elogcat--query-parser-tokens
+              (error "Unexpected filter token"))))))))
+
+(defun elogcat--query-line-text (record)
+  "Return Android Studio style searchable line text for RECORD."
+  (mapconcat #'identity
+             (delq nil (list (elogcat-record-timestamp record)
+                             (elogcat-record-pid record)
+                             (elogcat-record-tid record)
+                             (elogcat-record-level record)
+                             (elogcat-record-tag record)
+                             (elogcat-record-process-name record)
+                             (string-join (elogcat-record-application-ids record) " ")
+                             (elogcat--message-text record)))
+             " "))
+
+(defun elogcat--query-field-values (field record)
+  "Return FIELD values from RECORD."
+  (pcase field
+    ('tag (list (or (elogcat-record-tag record) "")))
+    ('package (or (elogcat-record-application-ids record) '("")))
+    ('process (list (or (elogcat-record-process-name record) "")))
+    ('message (list (or (elogcat--message-text record) "")))
+    ((or 'line 'implicit) (list (elogcat--query-line-text record)))
+    (_ nil)))
+
+(defun elogcat--query-string-match-p (operator pattern value)
+  "Return whether VALUE matches PATTERN using OPERATOR."
+  (let ((case-fold-search (not elogcat-query-match-case)))
+    (pcase operator
+      ('contains (string-match-p (regexp-quote pattern) value))
+      ('exact (string-equal (if case-fold-search (downcase pattern) pattern)
+                            (if case-fold-search (downcase value) value)))
+      ('regex (string-match-p pattern value))
+      (_ nil))))
+
+(defun elogcat--query-level-index (level)
+  "Return Android Studio priority index for LEVEL."
+  (or (cl-position (if (equal level "F") "A" level)
+                   '("V" "D" "I" "W" "E" "A") :test #'string=)
+      -1))
+
+(defconst elogcat--firebase-tags
+  '("AppInstallOperation" "AppInviteActivity" "AppInviteAgent"
+    "AppInviteAnalytics" "AppInviteLogger" "BackgroundTask" "ClassMapper"
+    "Connection" "DataOperation" "EventRaiser" "FA" "FirebaseAppIndex"
+    "FirebaseDatabase" "FirebaseInstanceId" "FirebaseMessaging"
+    "FirebaseRemoteConfig" "NetworkRequest" "Persistence"
+    "PersistentConnection" "RepoOperation" "RunLoop" "StorageTask"
+    "SyncTree" "Transaction" "WebSocket")
+  "Tags recognized by Android Studio's is:firebase filter.")
+
+(defun elogcat--query-age-seconds (value)
+  "Return VALUE converted from Android Studio age syntax to seconds."
+  (unless (string-match "\\`\\([0-9]+\\)\\([smhd]\\)\\'" value)
+    (error "Invalid age: %s" value))
+  (* (string-to-number (match-string 1 value))
+     (pcase (match-string 2 value)
+       ("s" 1) ("m" 60) ("h" 3600) ("d" 86400))))
+
+(defun elogcat--query-record-time (record)
+  "Return RECORD time as the closest matching year, or nil."
+  (when-let* ((timestamp (elogcat-record-timestamp record)))
+    (let* ((current-year (string-to-number (format-time-string "%Y")))
+           (candidates
+            (delq nil
+                  (mapcar (lambda (year)
+                            (ignore-errors
+                              (date-to-time (format "%d-%s" year timestamp))))
+                          (list (1- current-year) current-year
+                                (1+ current-year))))))
+      (car (sort candidates
+                 (lambda (left right)
+                   (< (abs (float-time (time-subtract nil left)))
+                      (abs (float-time (time-subtract nil right))))))))))
+
+(defun elogcat--query-special-match-p (term record)
+  "Match special query TERM against RECORD."
+  (let ((field (elogcat-query-term-field term))
+        (value (downcase (elogcat-query-term-value term))))
+    (pcase field
+      ('level
+       (when-let* ((required (elogcat--query-level value)))
+         (>= (elogcat--query-level-index (elogcat-record-level record))
+             (elogcat--query-level-index required))))
+      ('age
+       (when-let* ((time (elogcat--query-record-time record)))
+         (<= (float-time (time-subtract nil time))
+             (elogcat--query-age-seconds value))))
+      ('name t)
+      ('is
+       (cond
+        ((equal value "crash")
+         (or (and (equal (elogcat-record-level record) "E")
+                  (equal (elogcat-record-tag record) "AndroidRuntime")
+                  (string-prefix-p "FATAL EXCEPTION"
+                                   (elogcat--message-text record)))
+             (and (equal (elogcat-record-level record) "A")
+                  (member (elogcat-record-tag record) '("DEBUG" "libc")))))
+        ((equal value "stacktrace")
+         (string-match-p "\n[[:space:]]*at .+(.+)\n?"
+                         (elogcat--message-text record)))
+        ((equal value "firebase")
+         (member (elogcat-record-tag record) elogcat--firebase-tags))
+        ((elogcat--query-level value)
+         (= (elogcat--query-level-index (elogcat-record-level record))
+            (elogcat--query-level-index (elogcat--query-level value))))
+        (t (error "Invalid is filter: %s" value))))
+      (_ nil))))
+
+(defun elogcat--query-term-match-p (term record)
+  "Return non-nil when query TERM matches RECORD."
+  (let* ((field (elogcat-query-term-field term))
+         (value (elogcat-query-term-value term))
+         (matched
+          (if (memq field '(level age is name))
+              (elogcat--query-special-match-p term record)
+            (if (and (eq field 'package) (equal value "mine"))
+                (and elogcat-package-filter
+                     (elogcat--package-matches-p record))
+              (seq-some
+               (lambda (field-value)
+                 (elogcat--query-string-match-p
+                  (elogcat-query-term-operator term) value field-value))
+               (elogcat--query-field-values field record))))))
+    (if (elogcat-query-term-negated term) (not matched) matched)))
+
+(defun elogcat--query-ast-match-p (ast record)
+  "Return non-nil when AST matches RECORD."
+  (if (eq ast 'true)
+      t
+    (pcase (car-safe ast)
+      ('and (seq-every-p (lambda (node)
+                           (elogcat--query-ast-match-p node record))
+                         (cdr ast)))
+      ('or (seq-some (lambda (node)
+                       (elogcat--query-ast-match-p node record))
+                     (cdr ast)))
+      (_ (elogcat--query-term-match-p ast record)))))
+
+(defun elogcat--query-validate-term (term)
+  "Validate query TERM or signal an error."
+  (pcase (elogcat-query-term-field term)
+    ('level (unless (elogcat--query-level (elogcat-query-term-value term))
+              (error "Invalid level")))
+    ('age (elogcat--query-age-seconds (elogcat-query-term-value term)))
+    ('is (let ((value (downcase (elogcat-query-term-value term))))
+           (unless (or (member value '("crash" "firebase" "stacktrace"))
+                       (elogcat--query-level value))
+             (error "Invalid is filter"))))
+    (_ (when (eq (elogcat-query-term-operator term) 'regex)
+         (string-match-p (elogcat-query-term-value term) "")))))
+
+(defun elogcat--query-walk-terms (ast function)
+  "Call FUNCTION for every leaf term in AST."
+  (if (eq ast 'true)
+      nil
+    (if (memq (car-safe ast) '(and or))
+        (dolist (node (cdr ast))
+          (elogcat--query-walk-terms node function))
+      (funcall function ast))))
+
+(defun elogcat--query-compile (query)
+  "Compile QUERY, falling back to whole-line contains on errors."
+  (unless (string-empty-p query)
+    (condition-case nil
+        (let ((ast (elogcat--query-parse query)))
+          (elogcat--query-walk-terms ast #'elogcat--query-validate-term)
+          ast)
+      (error
+       (make-elogcat-query-term :field 'implicit :operator 'contains
+                                :value query :negated nil)))))
+
+(defun elogcat--query-matches-p (record)
+  "Return non-nil when RECORD passes `elogcat-query-filter'."
+  (or (null elogcat--query-predicate)
+      (elogcat--query-ast-match-p elogcat--query-predicate record)))
 
 (defun elogcat--rebuild-package-message-cache (&optional records)
   "Cache Error/Fatal/Assert groups mentioning the selected package in RECORDS."
@@ -528,6 +914,7 @@ Only lines at or above this level will be displayed."
            (minimum (or (cl-position elogcat-min-level elogcat-level-priority
                                      :test #'string=) 0)))
       (and (elogcat--package-matches-p record)
+           (elogcat--query-matches-p record)
            (or (null level)
                (>= (or (cl-position level elogcat-level-priority
                                     :test #'string=) 0)
@@ -536,6 +923,27 @@ Only lines at or above this level will be displayed."
                (string-match-p elogcat-include-filter-regexp text))
            (or (null elogcat-exclude-filter-regexp)
                (not (string-match-p elogcat-exclude-filter-regexp text)))))))
+
+(defun elogcat-set-query-filter (query)
+  "Set Android Studio compatible filter QUERY and redraw the backlog."
+  (interactive
+   (list (read-string "Logcat filter: " elogcat-query-filter
+                      'elogcat-query-filter-history)))
+  (setq elogcat-query-filter (unless (string-empty-p query) query)
+        elogcat--query-predicate
+        (and elogcat-query-filter
+             (elogcat--query-compile elogcat-query-filter)))
+  (elogcat--redraw-unless-paused)
+  (message "elogcat: query filter %s"
+           (or elogcat-query-filter "cleared")))
+
+(defun elogcat-toggle-query-match-case ()
+  "Toggle case-sensitive matching for the structured query filter."
+  (interactive)
+  (setq elogcat-query-match-case (not elogcat-query-match-case))
+  (elogcat--redraw-unless-paused)
+  (message "elogcat: query match case %s"
+           (if elogcat-query-match-case "on" "off")))
 
 (defun elogcat--record-size (record)
   "Return approximate retained size of RECORD."
@@ -661,6 +1069,17 @@ Only lines at or above this level will be displayed."
     (setq elogcat-pending-output (substring text position))
     (nreverse records)))
 
+(defun elogcat--query-group-became-visible-p (records)
+  "Return non-nil when RECORDS made an older message group match the query."
+  (when (and elogcat--query-predicate records)
+    (let ((first (car records)))
+      (and (elogcat-record-message-group first)
+           (eq (elogcat-record-message-group first)
+               (and elogcat--records-tail
+                    (elogcat-record-message-group
+                     (car elogcat--records-tail))))
+           (elogcat--query-matches-p first)))))
+
 (defun elogcat-process-filter (_process output)
   "Retain and display structured Logcat records parsed from OUTPUT."
   (when-let* ((buffer (get-buffer elogcat-buffer)))
@@ -672,6 +1091,8 @@ Only lines at or above this level will be displayed."
                             when (>= (window-point window) old-max)
                             collect window)))
              (records (elogcat--consume-output output))
+             (query-group-became-visible
+              (elogcat--query-group-became-visible-p records))
              (gc-cons-threshold most-positive-fixnum)
              (inhibit-redisplay t)
              (buffer-read-only nil)
@@ -683,7 +1104,7 @@ Only lines at or above this level will be displayed."
                     t)
                 (elogcat--cache-package-message-groups records))))
         (unless elogcat-paused
-          (if (or trimmed new-package-group)
+          (if (or trimmed new-package-group query-group-became-visible)
               (elogcat--render-backlog)
             (elogcat--insert-records records))
           (dolist (window following-windows)
@@ -803,6 +1224,8 @@ Only lines at or above this level will be displayed."
           ("W" . elogcat-toggle-soft-wrap)
           ("n" . elogcat-next-occurrence)
           ("p" . elogcat-previous-occurrence)
+          ("/" . elogcat-set-query-filter)
+          ("M-c" . elogcat-toggle-query-match-case)
           ("i" . elogcat-set-include-filter)
           ("x" . elogcat-set-exclude-filter)
           ("I" . elogcat-clear-include-filter)

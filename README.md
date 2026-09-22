@@ -20,6 +20,30 @@ filters follow app restarts and include remote processes such as
 processes such as `AndroidRuntime` are retained when their complete message
 mentions the selected package.
 
+Press `/` to enter an Android Studio compatible filter expression. Supported
+fields are `tag:`, `package:`, `process:`, `message:`, and `line:`. Bare terms
+search the complete formatted log entry. Terms support contains (`tag:foo`),
+exact (`tag=:foo`), regex (`tag~:foo.*`), and negated variants such as
+`-tag:foo` and `-tag~:foo.*`. Values may be single- or double-quoted.
+
+Whitespace combines different fields with AND. Multiple positive terms for the
+same field use Android Studio's implicit OR behavior. Explicit `&`, `|`, and
+parentheses are supported, with `&` binding more tightly than `|`:
+
+```text
+tag:ActivityManager level:warn
+package:mine (is:crash | is:stacktrace)
+tag:Network | (process:worker & message~:"timeout|failed")
+-package:com.example.debug age:10m
+```
+
+Special filters include `level:verbose|debug|info|warn|error|assert`,
+`age:<number><s|m|h|d>`, `is:crash`, `is:stacktrace`, `is:firebase`, and exact
+levels such as `is:error`. `package:mine` uses the package selected with `P`.
+Invalid expressions fall back to a case-insensitive whole-line text search,
+matching Android Studio's failure behavior. `M-c` toggles case-sensitive query
+matching.
+
 ## ScreenShot
 
 - **elogcat**
@@ -54,6 +78,8 @@ Key | Function
 <kbd>W</kbd> | Toggle soft wrapping
 <kbd>n</kbd> / <kbd>p</kbd> | Next/previous Error, Fatal, Assert, or stack frame
 <kbd>C</kbd> | Clear the device log and local backlog
+<kbd>/</kbd> | Set or clear an Android Studio compatible filter expression
+<kbd>M-c</kbd> | Toggle case-sensitive structured query matching
 <kbd>i</kbd> / <kbd>x</kbd> | Set include/exclude regexp and redraw immediately
 <kbd>I</kbd> / <kbd>X</kbd> | Clear include/exclude regexp
 <kbd>L</kbd> | Set minimum log level and redraw immediately

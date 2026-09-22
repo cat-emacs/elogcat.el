@@ -20,7 +20,36 @@
           "__ELOGCAT_PROCESSES__\n"
           "UID PID NAME\n"
           "10123 1234 com.example.app:remote\n"
-          "10124 2345 shared.process\n"))
+          "10124 2345 shared.process\n"
+          "10124 2346 com.shared.one:worker\n"))
+
+(defun elogcat-tests--query-record (&rest properties)
+  "Return a structured record with PROPERTIES for query tests."
+  (let ((record
+         (make-elogcat-record
+          :raw "09-18 12:34:56.789  1234  5678 W DemoTag: Hello World"
+          :timestamp "09-18 12:34:56.789" :pid "1234" :tid "5678"
+          :level "W" :tag "DemoTag" :message "Hello World"
+          :application-ids '("com.example.app")
+          :process-name "com.example.app:worker"
+          :message-group (elogcat--new-message-group "Hello World"))))
+    (while properties
+      (let ((property (pop properties))
+            (value (pop properties)))
+        (pcase property
+          (:raw (setf (elogcat-record-raw record) value))
+          (:timestamp (setf (elogcat-record-timestamp record) value))
+          (:level (setf (elogcat-record-level record) value))
+          (:tag (setf (elogcat-record-tag record) value))
+          (:message (setf (elogcat-record-message record) value))
+          (:message-group (setf (elogcat-record-message-group record) value))
+          (_ (error "Unsupported test record property: %S" property)))))
+    record))
+
+(defun elogcat-tests--query-matches (query record)
+  "Return whether QUERY matches RECORD."
+  (let ((elogcat--query-predicate (elogcat--query-compile query)))
+    (elogcat--query-matches-p record)))
 
 (defmacro elogcat-tests--with-buffer (&rest body)
   "Evaluate BODY in an isolated Logcat buffer."
@@ -37,15 +66,15 @@
   "Package UIDs map main, remote, and shared-UID processes to application IDs."
   (let* ((table (elogcat--parse-process-query elogcat-tests--process-query))
          (remote (gethash "1234" table))
-         (shared (gethash "2345" table)))
+         (ambiguous (gethash "2345" table))
+         (shared (gethash "2346" table)))
     (should (equal (elogcat-process-info-process-name remote)
                    "com.example.app:remote"))
     (should (equal (elogcat-process-info-application-ids remote)
                    '("com.example.app")))
-    (should (equal (sort (copy-sequence
-                          (elogcat-process-info-application-ids shared))
-                         #'string<)
-                   '("com.shared.one" "com.shared.two")))))
+    (should-not (elogcat-process-info-application-ids ambiguous))
+    (should (equal (elogcat-process-info-application-ids shared)
+                   '("com.shared.one")))))
 
 (ert-deftest elogcat-package-filter-keeps-system-and-assert-crash-messages ()
   "System markers and Assert proxy crashes survive package filtering."
@@ -148,6 +177,135 @@
        (elogcat-toggle-package "com.example.app")
        (should refreshed)
        (should (equal elogcat--records (list record)))))))
+
+(ert-deftest elogcat-query-late-group-match-redraws-hidden-header ()
+  "A later matching stack line reveals earlier lines in the same message group."
+  (elogcat-tests--with-buffer
+   (setq elogcat-query-filter "message:Main.kt"
+         elogcat--query-predicate
+         (elogcat--query-compile "message:Main.kt"))
+   (elogcat-process-filter
+    nil "09-18 12:34:58.000  1234  1234 E Demo: Failure\n")
+   (should (string-empty-p (buffer-string)))
+   (elogcat-process-filter
+    nil "09-18 12:34:58.000  1234  1234 E Demo:     at demo.Main.run(Main.kt:42)\n")
+   (should (string-match-p "Failure" (buffer-string)))
+   (should (string-match-p "Main.kt:42" (buffer-string)))))
+
+(ert-deftest elogcat-query-matches-studio-field-operators ()
+  "Structured fields support contains, exact, regex, and negation operators."
+  (elogcat-tests--with-buffer
+   (let ((record (elogcat-tests--query-record)))
+     (should (elogcat-tests--query-matches "tag:demo" record))
+     (should (elogcat-tests--query-matches "package=:com.example.app" record))
+     (should (elogcat-tests--query-matches "process~:worker$" record))
+     (should (elogcat-tests--query-matches "message:'Hello World'" record))
+     (setf (elogcat-record-message-group record)
+           (elogcat--new-message-group "Main.kt"))
+     (should (elogcat-tests--query-matches "message~:\"Main\\.kt\"" record))
+     (should (elogcat-tests--query-matches "-tag:other" record))
+     (should-not (elogcat-tests--query-matches "-tag:demo" record))
+     (should-not (elogcat-tests--query-matches "tag=:demo" record)))))
+
+(ert-deftest elogcat-query-uses-studio-implicit-grouping ()
+  "Positive terms sharing a field OR while different fields AND."
+  (elogcat-tests--with-buffer
+   (let ((record (elogcat-tests--query-record)))
+     (should (elogcat-tests--query-matches
+              "tag:other tag:Demo package:example" record))
+     (should-not (elogcat-tests--query-matches
+                  "tag:other tag:missing package:example" record))
+     (should-not (elogcat-tests--query-matches
+                  "tag:Demo package:missing" record)))))
+
+(ert-deftest elogcat-query-honors-operators-and-parentheses ()
+  "Explicit AND binds tighter than OR and parentheses override precedence."
+  (elogcat-tests--with-buffer
+   (let ((record (elogcat-tests--query-record)))
+     (should (elogcat-tests--query-matches
+              "tag:missing | tag:Demo & package:example" record))
+     (should-not (elogcat-tests--query-matches
+                  "(tag:missing | tag:Demo) & package:other" record)))))
+
+(ert-deftest elogcat-query-supports-empty-parens-and-assert-letters ()
+  "Empty parentheses match all and F/A both represent Studio ASSERT."
+  (elogcat-tests--with-buffer
+   (let ((record (elogcat-tests--query-record :level "F")))
+     (should (elogcat-tests--query-matches "()" record))
+     (should (elogcat-tests--query-matches "is:assert" record))
+     (should (elogcat-tests--query-matches "level:assert" record)))))
+
+(ert-deftest elogcat-query-matches-complete-message-groups ()
+  "A message term matching one stack line keeps every line in its group."
+  (elogcat-tests--with-buffer
+   (let* ((header (elogcat--parse-record
+                   "09-18 12:34:58.000  1234  1234 E Demo: Failure"))
+          (frame (elogcat--parse-record
+                  "09-18 12:34:58.000  1234  1234 E Demo:     at demo.Main.run(Main.kt:42)"
+                  header))
+          (predicate (elogcat--query-compile "message:Main.kt")))
+     (setq elogcat--query-predicate predicate)
+     (should (elogcat--query-matches-p header))
+     (should (elogcat--query-matches-p frame)))))
+
+(ert-deftest elogcat-query-supports-level-age-and-is-filters ()
+  "Level, age, crash, stacktrace, Firebase, and exact-level filters match Studio."
+  (elogcat-tests--with-buffer
+   (let* ((now (format-time-string "%m-%d %H:%M:%S.000"))
+          (record (elogcat-tests--query-record))
+          (crash (elogcat-tests--query-record
+                  :level "E" :tag "AndroidRuntime"
+                  :message "FATAL EXCEPTION: main"
+                  :message-group
+                  (elogcat--new-message-group "FATAL EXCEPTION: main")))
+          (stack (elogcat-tests--query-record
+                  :message "Failure"
+                  :message-group
+                  (elogcat--new-message-group
+                   "Failure\n    at demo.Main.run(Main.kt:42)\n"))))
+     (setf (elogcat-record-timestamp record) now)
+     (should (elogcat-tests--query-matches "level:info" record))
+     (should-not (elogcat-tests--query-matches "level:error" record))
+     (should (elogcat-tests--query-matches "is:warn" record))
+     (should (elogcat-tests--query-matches "age:10s" record))
+     (should (elogcat-tests--query-matches "is:crash" crash))
+     (should (elogcat-tests--query-matches "is:stacktrace" stack))
+     (setf (elogcat-record-tag record) "FA")
+     (should (elogcat-tests--query-matches "is:firebase" record)))))
+
+(ert-deftest elogcat-query-supports-package-mine-and-match-case ()
+  "Package mine uses the selected package and matching defaults to case-folded."
+  (elogcat-tests--with-buffer
+   (let ((record (elogcat-tests--query-record)))
+     (setq elogcat-package-filter "com.example.app")
+     (should (elogcat-tests--query-matches "package:mine" record))
+     (should (elogcat-tests--query-matches "tag:demotag" record))
+     (setq elogcat-query-match-case t)
+     (should-not (elogcat-tests--query-matches "tag:demotag" record)))))
+
+(ert-deftest elogcat-query-invalid-expression-falls-back-to-line-text ()
+  "Invalid structured queries become a whole-line contains filter like Studio."
+  (elogcat-tests--with-buffer
+   (let ((record
+          (elogcat-tests--query-record
+           :message "level:nope"
+           :message-group (elogcat--new-message-group "level:nope"))))
+     (should (elogcat-tests--query-matches "level:nope" record))
+     (should-not (elogcat-tests--query-matches "age:bogus" record)))))
+
+(ert-deftest elogcat-query-command-redraws-without-restarting ()
+  "Setting a query changes only the backlog projection."
+  (elogcat-tests--with-buffer
+   (let ((record (elogcat-tests--query-record)))
+     (setq elogcat--records (list record))
+     (cl-letf (((symbol-function 'elogcat-stop)
+                (lambda () (ert-fail "query restarted Logcat")))
+               ((symbol-function 'message) #'ignore))
+       (elogcat-set-query-filter "tag:Demo")
+       (should (equal elogcat-query-filter "tag:Demo"))
+       (should (string-match-p "Hello World" (buffer-string)))
+       (elogcat-set-query-filter "tag:missing")
+       (should (string-empty-p (buffer-string)))))))
 
 (ert-deftest elogcat-parse-threadtime-record ()
   "Threadtime fields are retained as a structured record."
@@ -304,6 +462,10 @@
   (should (eq (lookup-key elogcat-mode-map (kbd "n"))
               #'elogcat-next-occurrence))
   (should (eq (lookup-key elogcat-mode-map (kbd "p"))
-              #'elogcat-previous-occurrence)))
+              #'elogcat-previous-occurrence))
+  (should (eq (lookup-key elogcat-mode-map (kbd "/"))
+              #'elogcat-set-query-filter))
+  (should (eq (lookup-key elogcat-mode-map (kbd "M-c"))
+              #'elogcat-toggle-query-match-case)))
 
 ;;; elogcat-tests.el ends here
