@@ -196,11 +196,11 @@
                ((symbol-function 'elogcat--stop-process-monitor)
                 (lambda () (ert-fail "package toggle stopped monitor")))
                ((symbol-function 'message) #'ignore))
-       (elogcat-select-mine "com.example.app")
+       (elogcat--set-mine "com.example.app")
        (should refreshed)
        (should (equal elogcat--records (list record)))
        (setq refreshed nil)
-       (elogcat-select-mine "com.example.app")
+       (elogcat--set-mine "com.example.app")
        (should refreshed)
        (should (equal elogcat--records (list record)))))))
 
@@ -514,6 +514,7 @@
    (let ((buffer-read-only nil))
      (insert "one\ntwo\n"))
    (goto-char (point-max))
+   (setq elogcat-stream-state 'live)
    (should (string-match-p "LIVE" (elogcat-make-status)))
    (goto-char (point-min))
    (should (string-match-p "HOLD" (elogcat-make-status)))
@@ -536,15 +537,24 @@
   (dolist (binding '(("SPC" . elogcat-toggle-pause)
                      ("/" . elogcat-set-query-filter)
                      ("?" . describe-mode)
+                     ("RET" . elogcat-visit-source)
+                     ("TAB" . elogcat-toggle-exception-fold)
+                     ("<backtab>" . elogcat-toggle-all-exception-folds)
                      ("c" . elogcat-erase-buffer)
+                     ("D" . elogcat-choose-device)
                      ("f" . elogcat-toggle-follow-tail)
                      ("g" . elogcat-show-status)
+                     ("h" . elogcat-select-filter-history)
                      ("l" . elogcat-set-level)
+                     ("N" . elogcat-use-saved-filter)
+                     ("C-c C-s" . elogcat-save-current-filter)
                      ("n" . elogcat-next-occurrence)
                      ("o" . occur)
                      ("p" . elogcat-previous-occurrence)
                      ("q" . elogcat-exit)
+                     ("r" . elogcat-reconnect)
                      ("s" . elogcat-save-buffer)
+                     ("V" . elogcat-select-visible-fields)
                      ("w" . elogcat-toggle-soft-wrap)
                      ("M-c" . elogcat-toggle-query-match-case)
                      ("P" . elogcat-select-mine)))
@@ -555,8 +565,226 @@
   (should (eq (lookup-key elogcat-mode-map [remap previous-line])
               #'elogcat-previous-occurrence))
   (dolist (key '("C" "W" "i" "x" "I" "X" "L" "S" "F"
-                 "m" "r" "e" "k"))
+                 "m" "e" "k"))
     (should-not (lookup-key elogcat-mode-map (kbd key)))))
+
+(ert-deftest elogcat-device-parser-and-adb-command-use-serial ()
+  "Device discovery preserves model labels and all adb calls use the serial."
+  (elogcat-tests--with-buffer
+   (let ((devices (elogcat--parse-devices
+                   "List of devices attached\nSER1 device product:p model:Pixel_9 device:x\nSER2 offline\n")))
+     (should (equal devices '(("SER1" . "Pixel_9"))))
+     (setq elogcat-device-serial "SER1")
+     (should (equal (elogcat--adb-command "shell" "ps")
+                    '("adb" "-s" "SER1" "shell" "ps"))))))
+
+(ert-deftest elogcat-package-cache-parses-uid-metadata ()
+  "Installed package metadata is reusable independently of process output."
+  (let ((metadata (elogcat--parse-package-output
+                   "package:com.example uid:10123\npackage:com.other uid:10124\n")))
+    (should (equal (sort (plist-get metadata :packages) #'string<)
+                   '("com.example" "com.other")))
+    (should (equal (gethash "10123" (plist-get metadata :uids))
+                   '("com.example")))))
+
+(ert-deftest elogcat-query-diagnostics-preserve-fallback ()
+  "Invalid queries remain text filters while exposing a diagnostic."
+  (elogcat-tests--with-buffer
+   (let ((term (elogcat--query-compile "tag~:[")))
+     (should (elogcat-query-term-p term))
+     (should elogcat-query-error)
+     (should (equal (elogcat-query-term-field term) 'implicit)))))
+
+(ert-deftest elogcat-structured-display-and-folding-only-change-projection ()
+  "Column presets and exception folding redraw without changing records."
+  (elogcat-tests--with-buffer
+   (let* ((header (elogcat--parse-record
+                   "09-18 12:34:58.000  1234  1234 E Demo: Failure"))
+          (frame (elogcat--parse-record
+                  "    at demo.Main.run(Main.kt:42)" header)))
+     (setq elogcat--records (list header frame)
+           elogcat-visible-fields '(level tag message))
+     (elogcat--render-backlog)
+     (should (string-match-p "E Demo Failure" (buffer-string)))
+     (goto-char (point-max))
+     (forward-line -1)
+     (elogcat-toggle-exception-fold)
+     (should (= (length elogcat--records) 2))
+     (should (string-match-p "stack frames folded" (buffer-string)))
+     (should-not (string-match-p "Main.kt:42" (buffer-string))))))
+
+(ert-deftest elogcat-clear-is-asynchronous-and-device-scoped ()
+  "Clearing starts a serial-qualified process without sleeping."
+  (elogcat-tests--with-buffer
+   (setq elogcat-device-serial "SER1")
+   (let (process-command)
+     (cl-letf (((symbol-function 'make-process)
+                (lambda (&rest arguments)
+                  (setq process-command (plist-get arguments :command))
+                  'fake-process))
+               ((symbol-function 'process-put) #'ignore)
+               ((symbol-function 'process-live-p) (lambda (_process) nil))
+               ((symbol-function 'sleep-for)
+                (lambda (&rest _) (ert-fail "clear blocked Emacs"))))
+       (elogcat-erase-buffer)
+       (should (equal (seq-take process-command 4)
+                      '("adb" "-s" "SER1" "shell")))))))
+
+(ert-deftest elogcat-visit-source-opens-project-file-at-line ()
+  "Stack-frame navigation resolves source files inside the project root."
+  (let ((root (make-temp-file "elogcat-project" t)))
+    (unwind-protect
+        (let* ((file (expand-file-name "src/Main.kt" root))
+               (elogcat-project-root root))
+          (make-directory (file-name-directory file) t)
+          (with-temp-file file (insert "one\ntwo\nthree\n"))
+          (elogcat-tests--with-buffer
+           (setq elogcat-project-root root)
+           (let ((buffer-read-only nil))
+             (insert (elogcat--format-record
+                      (elogcat--parse-record
+                       "    at demo.Main.run(Main.kt:2)"))))
+           (goto-char (point-min))
+           (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil)))
+             (elogcat-visit-source))
+           (should (equal (buffer-file-name) file))
+           (should (= (line-number-at-pos) 2))
+           (kill-buffer (current-buffer))))
+      (delete-directory root t))))
+
+(ert-deftest elogcat-reconnect-cancels-pending-retry ()
+  "A manual reconnect cancels its pending automatic retry."
+  (elogcat-tests--with-buffer
+   (let ((elogcat--reconnect-timer 'retry-timer)
+         canceled (started 0))
+     (cl-letf (((symbol-function 'timerp) (lambda (timer) (eq timer 'retry-timer)))
+               ((symbol-function 'cancel-timer) (lambda (timer) (setq canceled timer)))
+               ((symbol-function 'process-live-p) (lambda (_process) nil))
+               ((symbol-function 'elogcat--stop-process-monitor) #'ignore)
+               ((symbol-function 'elogcat--start-stream) (lambda () (cl-incf started))))
+       (elogcat-reconnect)
+       (should (eq canceled 'retry-timer))
+       (should-not elogcat--reconnect-timer)
+       (should (= started 1))))))
+
+(ert-deftest elogcat-old-device-package-result-is-discarded ()
+  "A package query cannot populate cache after the selected serial changes."
+  (elogcat-tests--with-buffer
+   (let ((process 'old-query)
+         (output (generate-new-buffer " *elogcat-old-packages*"))
+         callback-value)
+     (unwind-protect
+         (progn
+           (with-current-buffer output
+             (insert "package:com.old uid:10123\n"))
+           (setq elogcat--package-refresh-process process
+                 elogcat--package-refresh-callbacks
+                 (list (lambda (metadata) (setq callback-value metadata)))
+                 elogcat-device-serial "NEW")
+           (cl-letf (((symbol-function 'process-get)
+                      (lambda (_process property)
+                        (and (eq property 'elogcat-device-serial) "OLD")))
+                     ((symbol-function 'process-status) (lambda (_) 'exit))
+                     ((symbol-function 'process-exit-status) (lambda (_) 0)))
+             (elogcat--finish-package-query process output))
+           (should-not callback-value)
+           (should-not (gethash "NEW" elogcat--package-cache))
+           (should-not (gethash "OLD" elogcat--package-cache)))
+       (kill-buffer output)))))
+
+(ert-deftest elogcat-unresolved-record-survives-unrelated-process-refresh ()
+  "A later process refresh can enrich a PID absent from the first refresh."
+  (elogcat-tests--with-buffer
+   (let* ((record (elogcat--parse-record elogcat-tests--debug))
+          (empty (make-hash-table :test #'equal))
+          (resolved (make-hash-table :test #'equal)))
+     (setq elogcat--unresolved-records (list record))
+     (elogcat--update-process-table empty)
+     (should (equal elogcat--unresolved-records (list record)))
+     (puthash "1234"
+              (make-elogcat-process-info
+               :application-ids '("com.example") :process-name "com.example")
+              resolved)
+     (elogcat--update-process-table resolved)
+     (should-not elogcat--unresolved-records)
+     (should (equal (elogcat-record-application-ids record) '("com.example"))))))
+
+(ert-deftest elogcat-clearing-query-clears-parser-diagnostic ()
+  "Clearing an invalid query removes its visible parser diagnostic."
+  (elogcat-tests--with-buffer
+   (elogcat-set-query-filter "tag~:[")
+   (should elogcat-query-error)
+   (elogcat-set-query-filter "")
+   (should-not elogcat-query-error)
+   (should-not elogcat-query-filter)))
+
+(ert-deftest elogcat-stop-invalidates-pending-device-discovery ()
+  "Stopping prevents a late device-discovery sentinel from starting Logcat."
+  (elogcat-tests--with-buffer
+   (let ((elogcat--device-query-process 'discovery)
+         deleted)
+     (cl-letf (((symbol-function 'process-live-p)
+                (lambda (process) (eq process 'discovery)))
+               ((symbol-function 'delete-process)
+                (lambda (process) (setq deleted process)))
+               ((symbol-function 'elogcat--stop-process-monitor) #'ignore))
+       (elogcat-stop)
+       (should (eq deleted 'discovery))
+       (should-not elogcat--device-query-process)))))
+
+(ert-deftest elogcat-stale-clear-result-cannot-restart-current-session ()
+  "A superseded clear sentinel cannot stop or restart the current stream."
+  (elogcat-tests--with-buffer
+   (let ((old-clear 'old-clear)
+         (elogcat--clear-process 'new-clear)
+         (elogcat-device-serial "NEW")
+         stopped restarted)
+     (cl-letf (((symbol-function 'process-get)
+                (lambda (_process property)
+                  (pcase property
+                    ('elogcat-target-buffer (current-buffer))
+                    ('elogcat-device-serial "OLD"))))
+               ((symbol-function 'process-status) (lambda (_) 'exit))
+               ((symbol-function 'process-exit-status) (lambda (_) 0))
+               ((symbol-function 'elogcat-stop) (lambda () (setq stopped t)))
+               ((symbol-function 'elogcat) (lambda (&rest _) (setq restarted t))))
+       (elogcat--clear-finished old-clear "finished")
+       (should-not stopped)
+       (should-not restarted)
+       (should (eq elogcat--clear-process 'new-clear))))))
+
+(ert-deftest elogcat-stale-stream-output-is-ignored ()
+  "Output from a replaced stream cannot enter the current backlog."
+  (elogcat-tests--with-buffer
+   (setq elogcat--stream-process 'current-stream
+         elogcat-stream-state 'connecting)
+   (elogcat-process-filter 'old-stream (concat elogcat-tests--debug "\n"))
+   (should-not elogcat--records)
+   (should (eq elogcat-stream-state 'connecting))))
+
+(ert-deftest elogcat-stale-stream-exit-does-not-change-current-state ()
+  "The sentinel for a replaced stream cannot stop the current session."
+  (elogcat-tests--with-buffer
+   (setq elogcat--stream-process 'current-stream
+         elogcat-stream-state 'live)
+   (let (reconnected)
+     (cl-letf (((symbol-function 'process-buffer)
+                (lambda (_process) (current-buffer)))
+               ((symbol-function 'process-live-p) (lambda (_process) nil))
+               ((symbol-function 'elogcat--schedule-reconnect)
+                (lambda () (setq reconnected t))))
+       (elogcat-process-sentinel 'old-stream "finished\n")
+       (should (eq elogcat--stream-process 'current-stream))
+       (should (eq elogcat-stream-state 'live))
+       (should-not reconnected)))))
+
+(ert-deftest elogcat-stream-status-reports-offline-and-error ()
+  "Connection state replaces misleading LIVE status when disconnected."
+  (elogcat-tests--with-buffer
+   (setq elogcat-stream-state 'offline)
+   (should (string-match-p "OFFLINE" (elogcat-make-status)))
+   (setq elogcat-stream-state 'error)
+   (should (string-match-p "ERROR" (elogcat-make-status)))))
 
 (ert-deftest elogcat-mode-defaults-to-package-mine ()
   "New Logcat buffers use Android Studio's package:mine filter."

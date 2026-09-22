@@ -351,13 +351,15 @@
       (funcall function ast))))
 
 (defun elogcat--query-compile (query)
-  "Compile QUERY, falling back to whole-line contains on errors."
+  "Compile QUERY, recording diagnostics and falling back to text on errors."
+  (setq elogcat-query-error nil)
   (unless (string-empty-p query)
-    (condition-case nil
+    (condition-case error-data
         (let ((ast (elogcat--query-parse query)))
           (elogcat--query-walk-terms ast #'elogcat--query-validate-term)
           ast)
       (error
+       (setq elogcat-query-error (error-message-string error-data))
        (make-elogcat-query-term :field 'implicit :operator 'contains
                                 :value query :negated nil)))))
 
@@ -432,10 +434,20 @@
                 ('age "  recent duration")
                 (_ "")))))))
 
+(defconst elogcat--query-font-lock-keywords
+  '(("\\_<-?\\([[:alpha:]]+\\)\\(?:~\\|=\\)?:"
+     (1 font-lock-keyword-face))
+    ("[&|()]" . font-lock-builtin-face)
+    ("\\_<\\(?:mine\\|crash\\|stacktrace\\|firebase\\)\\_>"
+     . font-lock-constant-face))
+  "Font-lock rules used while editing Logcat queries.")
+
 (defun elogcat--query-minibuffer-setup ()
-  "Install Logcat query completion in the active minibuffer."
+  "Install Logcat query completion and syntax highlighting."
   (add-hook 'completion-at-point-functions
             #'elogcat-query-completion-at-point nil t)
+  (setq-local font-lock-defaults '(elogcat--query-font-lock-keywords))
+  (font-lock-mode 1)
   (local-set-key (kbd "TAB") #'completion-at-point))
 
 (defun elogcat--read-query-filter ()
@@ -450,6 +462,7 @@
   "Set Android Studio compatible filter QUERY and redraw the backlog."
   (interactive (list (elogcat--read-query-filter)))
   (setq elogcat-query-filter (unless (string-empty-p query) query)
+        elogcat-query-error nil
         elogcat--query-predicate
         (and elogcat-query-filter
              (elogcat--query-compile elogcat-query-filter)))

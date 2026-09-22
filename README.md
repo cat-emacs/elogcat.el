@@ -6,8 +6,14 @@ logcat interface for Emacs based on [android-mode](https://github.com/remvee/and
 bounded, structured backlog of `adb logcat -v threadtime` records. Filters and
 minimum levels are applied to the retained backlog immediately, without
 restarting adb. Pausing only stops rendering: incoming messages remain
-available when the stream resumes. The mode line reports `LIVE`, `HOLD`, or
-`PAUSED`, plus `WRAP` when soft wrapping is enabled.
+available when the stream resumes. The mode line reports `CONNECTING`, `LIVE`,
+`HOLD`, `PAUSED`, `RECONNECTING`, `OFFLINE`, or `ERROR`, plus `WRAP` when soft
+wrapping is enabled. Unexpected disconnects use bounded exponential-backoff
+reconnection; `r` reconnects immediately.
+
+All adb operations are asynchronous and scoped to a buffer-local device serial.
+A single connected device is selected automatically; when several are online,
+`elogcat` prompts on startup. Press `D` to rediscover and switch devices.
 
 Multi-line exceptions retain their header metadata, so tag, PID, and level
 filters keep stack traces together. Error/Fatal/Assert headers and stack frames
@@ -51,7 +57,17 @@ standard completion-at-point API. Press `TAB` to complete filter keys and
 values. `level:`, `is:`, and `age:` use built-in candidates; `package:`, `tag:`,
 and `process:` also offer values observed in the current backlog. This works
 with standard completion and CAPF frontends such as Corfu. Minibuffer history
-remains available with `M-p` and `M-n`.
+remains available with `M-p` and `M-n`. Query fields and operators are
+highlighted while editing. Invalid expressions still fall back to whole-line
+matching, while the parser diagnostic remains visible in the Logcat header.
+Queries can be recalled with `h`, saved with `C-c C-s`, and applied by name with
+`N`.
+
+Stack frames are source links: move to one and press `RET` (or middle-click) to
+open the matching Kotlin or Java file under the project root at the referenced
+line. `TAB` folds the current exception's stack frames and `S-TAB` toggles all
+exception folds. Folding and display presets only redraw the local backlog.
+Press `V` to choose Raw, Compact, Process, or Full fields.
 
 ## ScreenShot
 
@@ -86,6 +102,14 @@ Key | Function
 <kbd>/</kbd> | Set or clear an Android Studio-compatible filter query
 <kbd>l</kbd> | Select the minimum visible log level
 <kbd>P</kbd> | Select the application represented by `package:mine`
+<kbd>RET</kbd> | Open the source location referenced by a stack frame
+<kbd>TAB</kbd> / <kbd>S-TAB</kbd> | Fold one exception / toggle all exception folds
+<kbd>D</kbd> | Rediscover and switch Android devices
+<kbd>r</kbd> | Reconnect the selected device immediately
+<kbd>V</kbd> | Select Raw, Compact, Process, or Full display fields
+<kbd>h</kbd> | Select a recent query
+<kbd>N</kbd> | Apply a named saved query
+<kbd>C-c C-s</kbd> | Save the current query by name
 <kbd>f</kbd> | Toggle follow-tail (`LIVE`/`HOLD`)
 <kbd>w</kbd> | Toggle soft wrapping
 <kbd>n</kbd> / <kbd>p</kbd> | Next/previous Error, Fatal, Assert, or stack frame
@@ -112,6 +136,10 @@ workflow.
       elogcat-soft-wrap t                   ; default for new buffers
       elogcat-default-tail 100              ; initial device history
       elogcat-default-query "package:mine"   ; Android Studio default
+      elogcat-default-device-serial nil       ; discover/prompt for device
+      elogcat-auto-reconnect-attempts 5       ; bounded reconnect retries
+      elogcat-package-cache-ttl 60            ; cache package UID metadata
+      elogcat-default-visible-fields '(raw)   ; or structured field list
       elogcat-show-key-hints t                ; concise header shortcuts
       elogcat-process-refresh-interval 2)     ; package/PID refresh seconds
 ```

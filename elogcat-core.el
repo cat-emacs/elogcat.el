@@ -41,6 +41,8 @@
   "Hash table mapping PID strings to process metadata.")
 (defvar-local elogcat--process-refresh-timer nil)
 (defvar-local elogcat--process-refresh-process nil)
+(defvar-local elogcat--package-refresh-process nil)
+(defvar-local elogcat--package-refresh-callbacks nil)
 (defvar-local elogcat--unresolved-records nil)
 (defvar-local elogcat--package-message-cache nil)
 (defvar-local elogcat-query-filter nil)
@@ -49,8 +51,32 @@
 (defvar-local elogcat--query-completion-source-buffer nil)
 (defvar-local elogcat--redraw-function #'ignore
   "Function called when a module needs the backlog redrawn.")
+(defvar-local elogcat-device-serial nil
+  "Serial of the Android device used by this Logcat buffer.")
+(defvar-local elogcat-device-name nil)
+(defvar-local elogcat--devices nil)
+(defvar-local elogcat-stream-state 'stopped)
+(defvar-local elogcat-stream-error nil)
+(defvar-local elogcat--reconnect-timer nil)
+(defvar-local elogcat--reconnect-attempt 0)
+(defvar-local elogcat--intentional-stop nil)
+(defvar-local elogcat--start-tail nil)
+(defvar-local elogcat--device-query-process nil)
+(defvar-local elogcat--stream-process nil)
+(defvar-local elogcat--clear-process nil)
+(defvar-local elogcat-project-root nil)
+(defvar-local elogcat-query-error nil)
+(defvar-local elogcat--collapsed-groups nil)
+(defvar-local elogcat-visible-fields nil)
 (defvar elogcat-query-filter-history nil)
 (defconst elogcat-level-priority '("V" "D" "I" "W" "E" "F" "A"))
+
+(defun elogcat--adb-command (&rest arguments)
+  "Return an adb command for current device with ARGUMENTS."
+  (append (list "adb")
+          (when elogcat-device-serial
+            (list "-s" elogcat-device-serial))
+          arguments))
 
 (defun elogcat--new-message-group (message)
   "Return a new message group initialized with MESSAGE."
