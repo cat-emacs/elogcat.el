@@ -96,30 +96,26 @@ You can add these lines to your init file.
 
 Key bindings
 
+The `?` menu groups the primary command set. Frequent streaming and navigation
+commands remain available directly so normal Logcat use does not require an
+extra keystroke. The menu uses the optional `transient` package; when it is not
+installed, all commands remain available through `M-x`.
+
 Key | Function
 --- | --------
+<kbd>?</kbd> | Open the Logcat command menu
 <kbd>SPC</kbd> | Pause/resume rendering while continuing to collect messages
 <kbd>/</kbd> | Set or clear an Android Studio-compatible filter query
-<kbd>l</kbd> | Select the minimum visible log level
-<kbd>P</kbd> | Select the application represented by `package:mine`
 <kbd>RET</kbd> | Open the source location referenced by a stack frame
 <kbd>TAB</kbd> / <kbd>S-TAB</kbd> | Fold one exception / toggle all exception folds
-<kbd>D</kbd> | Rediscover and switch Android devices
-<kbd>r</kbd> | Reconnect the selected device immediately
-<kbd>V</kbd> | Select Raw, Compact, Process, or Full display fields
-<kbd>h</kbd> | Select a recent query
-<kbd>N</kbd> | Apply a named saved query
-<kbd>C-c C-s</kbd> | Save the current query by name
 <kbd>f</kbd> | Toggle follow-tail (`LIVE`/`HOLD`)
-<kbd>w</kbd> | Toggle soft wrapping
 <kbd>n</kbd> / <kbd>p</kbd> | Next/previous Error, Fatal, Assert, or stack frame
-<kbd>c</kbd> | Clear the device log and local backlog
-<kbd>o</kbd> | Run `occur`
-<kbd>s</kbd> | Save the buffer and stop Logcat
-<kbd>g</kbd> | Show detailed stream and filter status
-<kbd>M-c</kbd> | Toggle case-sensitive query matching
-<kbd>?</kbd> | Describe the mode and show all bindings
 <kbd>q</kbd> | Stop Logcat and close the buffer
+
+The Transient menu also provides minimum level, Mine application, device,
+reconnect, display fields, query history and saved queries, soft wrapping,
+clear, occur, status, and buffer saving. Those commands remain callable through
+`M-x` but no longer occupy top-level mode keys.
 
 Legacy include/exclude regexp commands and ring-buffer toggle commands remain
 available through `M-x`, but structured `/` queries are the primary filtering

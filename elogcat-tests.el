@@ -533,40 +533,38 @@
      (should-not truncate-lines))))
 
 (ert-deftest elogcat-mode-exposes-studio-style-controls ()
-  "The mode map exposes a compact set of everyday Logcat controls."
+  "The mode map keeps high-frequency Logcat controls directly accessible."
   (dolist (binding '(("SPC" . elogcat-toggle-pause)
                      ("/" . elogcat-set-query-filter)
-                     ("?" . describe-mode)
+                     ("?" . elogcat-dispatch)
                      ("RET" . elogcat-visit-source)
                      ("TAB" . elogcat-toggle-exception-fold)
                      ("<backtab>" . elogcat-toggle-all-exception-folds)
-                     ("c" . elogcat-erase-buffer)
-                     ("D" . elogcat-choose-device)
                      ("f" . elogcat-toggle-follow-tail)
-                     ("g" . elogcat-show-status)
-                     ("h" . elogcat-select-filter-history)
-                     ("l" . elogcat-set-level)
-                     ("N" . elogcat-use-saved-filter)
-                     ("C-c C-s" . elogcat-save-current-filter)
                      ("n" . elogcat-next-occurrence)
-                     ("o" . occur)
                      ("p" . elogcat-previous-occurrence)
-                     ("q" . elogcat-exit)
-                     ("r" . elogcat-reconnect)
-                     ("s" . elogcat-save-buffer)
-                     ("V" . elogcat-select-visible-fields)
-                     ("w" . elogcat-toggle-soft-wrap)
-                     ("M-c" . elogcat-toggle-query-match-case)
-                     ("P" . elogcat-select-mine)))
+                     ("q" . elogcat-exit)))
     (should (eq (lookup-key elogcat-mode-map (kbd (car binding)))
                 (cdr binding))))
   (should (eq (lookup-key elogcat-mode-map [remap next-line])
               #'elogcat-next-occurrence))
   (should (eq (lookup-key elogcat-mode-map [remap previous-line])
               #'elogcat-previous-occurrence))
-  (dolist (key '("C" "W" "i" "x" "I" "X" "L" "S" "F"
-                 "m" "e" "k"))
-    (should-not (lookup-key elogcat-mode-map (kbd key)))))
+  (dolist (key '("c" "D" "g" "h" "l" "N" "C-c C-s" "o" "r"
+                 "s" "V" "w" "M-c" "P" "C" "W" "i" "x" "I" "X"
+                 "L" "S" "F" "m" "e" "k"))
+    (should (eq (lookup-key elogcat-mode-map (kbd key)) #'undefined))))
+
+(ert-deftest elogcat-dispatch-loads-optional-menu ()
+  "The menu entry lazily loads and invokes the optional Transient UI."
+  (let (called)
+    (cl-letf (((symbol-function 'require)
+               (lambda (feature &optional _filename _noerror)
+                 (when (eq feature 'elogcat-transient)
+                   (fset 'elogcat-transient (lambda () (setq called t)))
+                   t))))
+      (elogcat-dispatch)
+      (should called))))
 
 (ert-deftest elogcat-device-parser-and-adb-command-use-serial ()
   "Device discovery preserves model labels and all adb calls use the serial."
@@ -785,6 +783,23 @@
    (should (string-match-p "OFFLINE" (elogcat-make-status)))
    (setq elogcat-stream-state 'error)
    (should (string-match-p "ERROR" (elogcat-make-status)))))
+
+(ert-deftest elogcat-transient-layout-is-stable ()
+  "The real menu exposes primary commands and preserves user suffixes."
+  (skip-unless (require 'transient nil t))
+  (require 'elogcat-transient)
+  (elogcat-transient--define)
+  (dolist (key '("SPC" "/" "l" "P" "V" "D" "q"))
+    (should (transient-get-suffix 'elogcat-transient-menu key)))
+  (unwind-protect
+      (progn
+        (transient-append-suffix
+         'elogcat-transient-menu "q"
+         '("Z" "Test customization" ignore))
+        (elogcat-transient--define)
+        (should (transient-get-suffix 'elogcat-transient-menu "Z")))
+    (ignore-errors
+      (transient-remove-suffix 'elogcat-transient-menu "Z"))))
 
 (ert-deftest elogcat-mode-defaults-to-package-mine ()
   "New Logcat buffers use Android Studio's package:mine filter."

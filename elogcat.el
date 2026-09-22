@@ -169,7 +169,7 @@ android-mode's current module and variant when available."
    (when elogcat-query-error
      (propertize (concat "  ! " elogcat-query-error) 'face 'error))
    (when elogcat-show-key-hints
-     (propertize "    / filter   l level   D device   RET source   ? keys"
+     (propertize "    ? menu   / filter   SPC pause   n/p errors"
                  'face 'shadow))))
 
 (defun elogcat--at-tail-p ()
@@ -973,40 +973,34 @@ Only lines at or above this level will be displayed."
 (elogcat-define-toggle-function crash "crash")
 (elogcat-define-toggle-function kernel "kernel")
 
+(defun elogcat-dispatch ()
+  "Show the optional Transient menu for the current Logcat session."
+  (interactive)
+  (unless (require 'elogcat-transient nil t)
+    (user-error "Install the transient package to use the Logcat menu"))
+  (funcall (intern "elogcat-transient")))
+
 (defvar elogcat-mode-map nil
   "Keymap for elogcat minor mode.")
 
 (unless elogcat-mode-map
   (setq elogcat-mode-map (make-sparse-keymap)))
 
-(dolist (key '("C" "W" "i" "x" "I" "X" "L" "S" "F"
-               "m" "s" "r" "e" "c" "k"))
-  (define-key elogcat-mode-map (kbd key) nil))
+(dolist (key '("c" "D" "g" "h" "l" "N" "C-c C-s" "o" "r" "s"
+               "V" "w" "M-c" "P" "C" "W" "i" "x" "I" "X" "L" "S"
+               "F" "m" "e" "k"))
+  (define-key elogcat-mode-map (kbd key) #'undefined))
 
 (--each '(("SPC" . elogcat-toggle-pause)
           ("/" . elogcat-set-query-filter)
-          ("?" . describe-mode)
+          ("?" . elogcat-dispatch)
           ("RET" . elogcat-visit-source)
           ("TAB" . elogcat-toggle-exception-fold)
           ("<backtab>" . elogcat-toggle-all-exception-folds)
-          ("c" . elogcat-erase-buffer)
-          ("D" . elogcat-choose-device)
           ("f" . elogcat-toggle-follow-tail)
-          ("g" . elogcat-show-status)
-          ("h" . elogcat-select-filter-history)
-          ("l" . elogcat-set-level)
-          ("N" . elogcat-use-saved-filter)
-          ("C-c C-s" . elogcat-save-current-filter)
           ("n" . elogcat-next-occurrence)
-          ("o" . occur)
           ("p" . elogcat-previous-occurrence)
-          ("q" . elogcat-exit)
-          ("r" . elogcat-reconnect)
-          ("s" . elogcat-save-buffer)
-          ("V" . elogcat-select-visible-fields)
-          ("w" . elogcat-toggle-soft-wrap)
-          ("M-c" . elogcat-toggle-query-match-case)
-          ("P" . elogcat-select-mine))
+          ("q" . elogcat-exit))
   (define-key elogcat-mode-map (read-kbd-macro (car it)) (cdr it)))
 
 (define-key elogcat-mode-map [remap next-line] #'elogcat-next-occurrence)
