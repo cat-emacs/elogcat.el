@@ -193,7 +193,7 @@ return one string or a list of strings.  The default uses
    (when elogcat-query-error
      (propertize (concat "  ! " elogcat-query-error) 'face 'error))
    (when elogcat-show-key-hints
-     (propertize "    ? menu   / filter   SPC pause   n/p errors"
+     (propertize "    ? menu   / filter   SPC pause   n/p lines   M-n/M-p errors"
                  'face 'shadow))))
 
 (defun elogcat--at-tail-p ()
@@ -1030,8 +1030,10 @@ Only lines at or above this level will be displayed."
     ("<backtab>" "Fold all" elogcat-toggle-all-exception-folds :transient t)
     ("o" "Occur" occur)]
    ["Navigate"
-    ("n" "Next occurrence" elogcat-next-occurrence :transient t)
-    ("p" "Previous occurrence" elogcat-previous-occurrence :transient t)
+    ("n" "Next line" next-line :transient t)
+    ("p" "Previous line" previous-line :transient t)
+    ("M-n" "Next occurrence" elogcat-next-occurrence :transient t)
+    ("M-p" "Previous occurrence" elogcat-previous-occurrence :transient t)
     ("RET" "Visit source" elogcat-visit-source)
     ("R" "Retrace exception" elogcat-retrace-exception)
     ("D" "Select device" elogcat-choose-device)
@@ -1061,9 +1063,11 @@ Only lines at or above this level will be displayed."
           ("l" . elogcat-set-level)
           ("N" . elogcat-use-saved-filter)
           ("C-c C-s" . elogcat-save-current-filter)
-          ("n" . elogcat-next-occurrence)
+          ("n" . next-line)
           ("o" . occur)
-          ("p" . elogcat-previous-occurrence)
+          ("p" . previous-line)
+          ("M-n" . elogcat-next-occurrence)
+          ("M-p" . elogcat-previous-occurrence)
           ("q" . elogcat-exit)
           ("r" . elogcat-reconnect)
           ("R" . elogcat-retrace-exception)
@@ -1075,9 +1079,6 @@ Only lines at or above this level will be displayed."
           ("M-c" . elogcat-toggle-query-match-case)
           ("P" . elogcat-select-mine))
   (define-key elogcat-mode-map (read-kbd-macro (car it)) (cdr it)))
-
-(define-key elogcat-mode-map [remap next-line] #'elogcat-next-occurrence)
-(define-key elogcat-mode-map [remap previous-line] #'elogcat-previous-occurrence)
 
 (define-derived-mode elogcat-mode special-mode "Logcat"
   "Major mode for browsing a structured Android Logcat stream."

@@ -128,7 +128,8 @@ Key | Function
 <kbd>TAB</kbd> / <kbd>S-TAB</kbd> | Fold one exception / toggle all exception folds
 <kbd>f</kbd> | Toggle follow-tail (`LIVE`/`HOLD`)
 <kbd>w</kbd> | Toggle soft wrapping
-<kbd>n</kbd> / <kbd>p</kbd> | Next/previous Error, Fatal, Assert, or stack frame
+<kbd>n</kbd> / <kbd>p</kbd> | Move down/up one line
+<kbd>M-n</kbd> / <kbd>M-p</kbd> | Next/previous Error, Fatal, Assert, or stack frame
 <kbd>c</kbd> | Clear the device log and local backlog
 <kbd>D</kbd> | Rediscover and switch Android devices
 <kbd>r</kbd> | Reconnect the selected device immediately
