@@ -67,7 +67,9 @@
      (unwind-protect
          (with-current-buffer (get-buffer-create elogcat-buffer)
            (elogcat-mode)
-           ,@body)
+           (cl-letf (((symbol-function 'android-adb-executable)
+                      (lambda () "/test/adb")))
+             ,@body))
        (when-let* ((buffer (get-buffer elogcat-buffer)))
          (kill-buffer buffer)))))
 
@@ -246,13 +248,13 @@
                   "package:mine | tag:Other" record)))))
 
 (ert-deftest elogcat-project-package-uses-public-android-api ()
-  "The default project resolver consumes android-mode's ID collection API."
+  "The default project resolver consumes android-project's ID collection API."
   (let (called)
     (cl-letf (((symbol-function 'android-project-application-ids)
                (lambda (&optional _root _refresh)
                  (setq called t)
                  '("com.example.app" "com.example.demo"))))
-      (should (equal (elogcat--android-mode-project-packages)
+      (should (equal (elogcat--project-packages)
                      '("com.example.app" "com.example.demo")))
       (should called))))
 
@@ -266,13 +268,13 @@
            '("com.example.app" "com.example.demo"))))
 
 (ert-deftest elogcat-project-model-refresh-updates-automatic-mine ()
-  "A completed android-mode refresh resolves an automatic Mine selection."
+  "A completed android-project refresh resolves an automatic Mine selection."
   (elogcat-tests--with-buffer
    (let (refreshed)
      (setq elogcat-project-root "/tmp/project/"
            elogcat--mine-auto-p t
            elogcat-package-filter nil)
-     (cl-letf (((symbol-function 'elogcat--android-mode-project-packages)
+     (cl-letf (((symbol-function 'elogcat--project-packages)
                 (lambda (&optional _root)
                   '("com.example.app" "com.example.demo")))
                ((symbol-function 'elogcat--refresh-process-table) #'ignore)
@@ -907,7 +909,7 @@
      (should (equal devices '(("SER1" . "Pixel_9"))))
      (setq elogcat-device-serial "SER1")
      (should (equal (elogcat--adb-command "shell" "ps")
-                    '("adb" "-s" "SER1" "shell" "ps"))))))
+                    '("/test/adb" "-s" "SER1" "shell" "ps"))))))
 
 (ert-deftest elogcat-package-cache-separates-third-party-candidates ()
   "Package metadata retains all UIDs but exposes only third-party choices."
@@ -992,7 +994,7 @@
                 (lambda (&rest _) (ert-fail "clear blocked Emacs"))))
        (elogcat-erase-buffer)
        (should (equal (seq-take process-command 4)
-                      '("adb" "-s" "SER1" "shell")))))))
+                      '("/test/adb" "-s" "SER1" "shell")))))))
 
 (ert-deftest elogcat-visit-source-opens-project-file-at-line ()
   "Stack-frame navigation resolves source files inside the project root."

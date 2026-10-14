@@ -6,7 +6,7 @@
 ;; Maintainer: Misaka <chuxubank@qq.com>
 ;; Version: 1.0.0
 ;; Keywords: tools
-;; Package-Requires: ((s "1.9.0") (dash "2.10.0") (transient "0.3.0"))
+;; Package-Requires: ((emacs "28.1") (s "1.9.0") (dash "2.10.0") (transient "0.3.0") (android-adb "0.1.0"))
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -32,6 +32,7 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'project)
+(require 'android-project nil t)
 (require 'transient)
 (require 'elogcat-core)
 (require 'elogcat-filter)
@@ -39,8 +40,8 @@
 
 ;;;; Declarations
 
-(declare-function android-root "android-mode" ())
-(declare-function android-project-application-ids "android-mode"
+(declare-function android-root "android-project" ())
+(declare-function android-project-application-ids "android-project"
                   (&optional project-root refresh))
 
 (defface elogcat-verbose-face '((t (:inherit default)))
@@ -107,11 +108,11 @@ The default matches Android Studio.  Set this to nil to show all messages."
   :type '(choice (const :tag "Show all messages" nil) string))
 
 (defcustom elogcat-project-package-function
-  #'elogcat--android-mode-project-packages
+  #'elogcat--project-packages
   "Function returning application IDs represented by `package:mine'.
 It is called in the buffer from which `elogcat' starts.  The function may
 return one string or a list of strings.  The default uses
-`android-project-application-ids' when `android-mode' provides it."
+`android-project-application-ids' when `android-project' provides it."
   :group 'elogcat
   :type '(choice (const :tag "Do not resolve automatically" nil) function))
 
@@ -627,18 +628,12 @@ Only lines at or above this level will be displayed."
 
 
 (defun elogcat--parse-devices (output)
-  "Return connected adb devices parsed from OUTPUT."
-  (let (devices)
-    (dolist (line (cdr (split-string output "\n" t)))
-      (when (string-match
-             "^\\([^[:space:]]+\\)[[:space:]]+device\\(?:[[:space:]]+\\(.*\\)\\)?$"
-             line)
-        (let* ((serial (match-string 1 line))
-               (properties (or (match-string 2 line) ""))
-               (model (and (string-match "model:\\([^[:space:]]+\\)" properties)
-                           (match-string 1 properties))))
-          (push (cons serial (or model serial)) devices))))
-    (nreverse devices)))
+  "Return usable adb device labels parsed from OUTPUT."
+  (mapcar (lambda (device)
+            (cons (plist-get device :serial)
+                  (or (plist-get device :model) (plist-get device :serial))))
+          (seq-filter (lambda (device) (eq (plist-get device :state) 'device))
+                      (android-adb-parse-devices output))))
 
 (defun elogcat--choose-device (devices)
   "Return a device serial selected from DEVICES."
@@ -689,7 +684,7 @@ Only lines at or above this level will be displayed."
   (let ((output-buffer (generate-new-buffer " *elogcat-devices*")))
     (setq elogcat--device-query-process
           (make-process :name "elogcat-devices" :buffer output-buffer
-                        :command '("adb" "devices" "-l")
+                        :command (android-adb-command nil "devices" "-l")
                         :connection-type 'pipe :noquery t
                         :sentinel #'elogcat--devices-sentinel))
     (process-put elogcat--device-query-process
@@ -1197,8 +1192,8 @@ As in Android Studio, separate messages with newlines and end with a newline."
                  (and (stringp package) (not (string-empty-p package))))
                (if (listp packages) packages (list packages)))))
 
-(defun elogcat--android-mode-project-packages (&optional project-root)
-  "Return `android-mode' application IDs for optional PROJECT-ROOT."
+(defun elogcat--project-packages (&optional project-root)
+  "Return `android-project' application IDs for optional PROJECT-ROOT."
   (when (fboundp 'android-project-application-ids)
     (ignore-errors (android-project-application-ids project-root))))
 
@@ -1212,7 +1207,7 @@ As in Android Studio, separate messages with newlines and end with a newline."
                  (string= (file-name-as-directory (expand-file-name root))
                           (file-name-as-directory
                            (expand-file-name elogcat-project-root))))
-        (let ((packages (elogcat--android-mode-project-packages root)))
+        (let ((packages (elogcat--project-packages root)))
           (unless (equal packages elogcat-package-filter)
             (elogcat--set-mine packages t)))))))
 
@@ -1318,7 +1313,7 @@ requests complete available history."
             (or elogcat--mine-auto-p
                 (and new-session
                      (eq elogcat-project-package-function
-                         #'elogcat--android-mode-project-packages)))
+                         #'elogcat--project-packages)))
             elogcat--start-tail
             (cond ((consp arg) nil)
                   (arg (list "-T" (number-to-string

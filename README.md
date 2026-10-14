@@ -1,6 +1,6 @@
 # elogcat.el [![MELPA](http://melpa.org/packages/elogcat-badge.svg)](http://melpa.org/#/elogcat)
 
-logcat interface for Emacs with optional [android-mode](https://github.com/remvee/android-mode) project integration.
+logcat interface for Emacs using [android-adb](https://github.com/cat-emacs/android-adb), with optional [android-project](https://github.com/cat-emacs/android-project) project integration.
 
 `elogcat-mode` is a read-only major mode derived from `special-mode`. It keeps a
 bounded, structured backlog of `adb logcat -v threadtime` records. Filters and
@@ -20,7 +20,7 @@ filters keep stack traces together. Error/Fatal/Assert headers and stack frames
 can be browsed as one wrapping occurrence sequence.
 
 `elogcat` starts with Android Studio's default `package:mine` query. When
-android-mode can resolve the project through its public API, the application
+android-project can resolve the project through its public API, the application
 IDs of all selected module targets are used automatically. Mine follows later
 asynchronous project-model refreshes. Otherwise Mine is marked as unresolved
 and the query temporarily shows all logs instead of an empty view; press `P` to
@@ -105,13 +105,13 @@ in Emacs, the system clipboard. Ordinary region copying remains unchanged.
 
 ## Installation
 
-It's available on [Melpa](https://melpa.org/):
-
-    M-x package-install elogcat
+This Cat fork uses android-adb. Install the VC repositories explicitly;
+android-project is optional and enables automatic project application-ID filtering.
 
 Requirements
 
-- **adb**
+- **Emacs 28.1 or newer**
+- **adb and android-adb 0.1.0**
 - **Transient 0.3.0 or newer** (built into current Emacs releases)
 
 [Installing the Android SDK](https://developer.android.com/sdk/installing/)
@@ -119,7 +119,13 @@ Requirements
 You can add these lines to your init file.
 
 ```elisp
+(use-package android-adb
+  :vc (:url "https://github.com/cat-emacs/android-adb"))
+;; Optional project integration, without android-mode:
+(use-package android-project
+  :vc (:url "https://github.com/cat-emacs/android-project"))
 (use-package elogcat
+  :vc (:url "https://github.com/cat-emacs/elogcat.el")
   :commands elogcat)
 ```
 
@@ -177,7 +183,7 @@ structured queries.
       elogcat-package-cache-ttl 60            ; cache package UID metadata
       elogcat-default-visible-fields '(raw)   ; or structured field list
       elogcat-project-package-function        ; string/list resolver, or nil
-      #'elogcat--android-mode-project-packages
+      #'elogcat--project-packages
       elogcat-show-key-hints t                ; concise header shortcuts
       elogcat-process-refresh-interval 2)     ; package/PID refresh seconds
 ```
