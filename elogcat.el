@@ -454,6 +454,19 @@ Only lines at or above this level will be displayed."
   (let* ((level (elogcat-record-level record))
          (face (cdr (or (assoc level elogcat-face-alist)
                         (assoc "V" elogcat-face-alist))))
+         (text (elogcat--format-fields record))
+         (message-offset
+          (if (memq 'raw elogcat-visible-fields)
+              (save-match-data
+                (if (string-match elogcat--threadtime-regexp text)
+                    (match-beginning 6)
+                  0))
+            (when (memq 'message elogcat-visible-fields)
+              (let* ((elogcat-visible-fields
+                      (seq-take-while (lambda (field) (not (eq field 'message)))
+                                      elogcat-visible-fields))
+                     (prefix (elogcat--format-fields record)))
+                (+ (length prefix) (if (string-empty-p prefix) 0 1))))))
          (occurrence (and (or (and (member level '("E" "F" "A"))
                                    (string-match-p elogcat--threadtime-regexp
                                                    (elogcat-record-raw record)))
@@ -461,8 +474,9 @@ Only lines at or above this level will be displayed."
                               (string-match-p "^[[:space:]]*\\(?:Caused by:\\|Suppressed:\\)"
                                               (or (elogcat-record-message record) "")))
                           record)))
-    (propertize (concat (elogcat--format-fields record) "\n")
+    (propertize (concat text "\n")
                 'face face 'elogcat-record record
+                'elogcat-message-offset message-offset
                 'elogcat-occurrence occurrence
                 'mouse-face (and (elogcat--stack-frame-p record) 'highlight)
                 'keymap (and (elogcat--stack-frame-p record)
@@ -798,6 +812,65 @@ Only lines at or above this level will be displayed."
   (force-mode-line-update)
   (message "elogcat: soft wrap %s" (if truncate-lines "off" "on")))
 
+(defun elogcat-next-line (&optional count)
+  "Move COUNT logical lines forward and land at the message field's start.
+COUNT defaults to one.  At the buffer boundary, stay on the last record."
+  (interactive "p")
+  (forward-line (or count 1))
+  (when (and (eobp) (> (point) (point-min)) (eq (char-before) ?\n))
+    (forward-line -1))
+  (let ((offset (get-text-property (point) 'elogcat-message-offset)))
+    (when offset
+      (goto-char (min (+ (point) offset) (line-end-position))))))
+
+(defun elogcat-previous-line (&optional count)
+  "Move COUNT logical lines backward and land at the message field's start."
+  (interactive "p")
+  (elogcat-next-line (- (or count 1))))
+
+(defun elogcat-copy-message-text ()
+  "Copy message text at point or intersecting the active region.
+Copy complete message groups, including folded stack frames, without metadata.
+As in Android Studio, separate messages with newlines and end with a newline."
+  (interactive)
+  (let ((seen (make-hash-table :test #'eq))
+        (group-lines (make-hash-table :test #'eq))
+        records selected)
+    (if (use-region-p)
+        (let ((position (region-beginning))
+              (end (region-end)))
+          (while (< position end)
+            (when-let* ((record (get-text-property position 'elogcat-record)))
+              (push record records))
+            (setq position (next-single-property-change
+                            position 'elogcat-record nil end)))
+          (setq records (nreverse records)))
+      (when-let* ((record (elogcat--record-at-position (point))))
+        (setq records (list record))))
+    (unless records (user-error "No Logcat message at point or in the region"))
+    (dolist (record records)
+      (let ((group (or (elogcat-record-message-group record) record)))
+        (unless (gethash group seen)
+          (puthash group t seen)
+          (push record selected))))
+    (dolist (record elogcat--records)
+      (let ((group (or (elogcat-record-message-group record) record)))
+        (when (gethash group seen)
+          (push (elogcat-record-message record) (gethash group group-lines)))))
+    (kill-new
+     (concat
+      (string-join
+       (mapcar (lambda (record)
+                 (let ((group (or (elogcat-record-message-group record) record)))
+                   (string-join
+                    (or (nreverse (gethash group group-lines))
+                        (list (elogcat-record-message record)))
+                    "\n")))
+               (nreverse selected))
+       "\n")
+      "\n"))
+    (message "elogcat: copied message text")))
+
 (defun elogcat--occurrence-positions ()
   "Return positions of errors, assertions, and stack frames in this buffer."
   (let ((position (point-min)) positions)
@@ -844,10 +917,12 @@ Only lines at or above this level will be displayed."
 (defun elogcat--record-group-lines (record)
   "Return original log lines belonging to RECORD's message group."
   (let ((group (elogcat-record-message-group record)))
-    (mapcar #'elogcat-record-message
-            (seq-filter (lambda (candidate)
-                          (eq (elogcat-record-message-group candidate) group))
-                        elogcat--records))))
+    (if group
+        (mapcar #'elogcat-record-message
+                (seq-filter (lambda (candidate)
+                              (eq (elogcat-record-message-group candidate) group))
+                            elogcat--records))
+      (list (elogcat-record-message record)))))
 
 (defun elogcat--cancel-retrace ()
   "Stop the active Retrace process and discard its output."
@@ -1030,8 +1105,8 @@ Only lines at or above this level will be displayed."
     ("<backtab>" "Fold all" elogcat-toggle-all-exception-folds :transient t)
     ("o" "Occur" occur)]
    ["Navigate"
-    ("n" "Next line" next-line :transient t)
-    ("p" "Previous line" previous-line :transient t)
+    ("n" "Next message line" elogcat-next-line :transient t)
+    ("p" "Previous message line" elogcat-previous-line :transient t)
     ("M-n" "Next occurrence" elogcat-next-occurrence :transient t)
     ("M-p" "Previous occurrence" elogcat-previous-occurrence :transient t)
     ("RET" "Visit source" elogcat-visit-source)
@@ -1040,6 +1115,7 @@ Only lines at or above this level will be displayed."
     ("g" "Show status" elogcat-show-status :transient t)
     ("x" "Save session" elogcat-save-session)
     ("O" "Open session" elogcat-open-session)
+    ("C-c M-w" "Copy message text" elogcat-copy-message-text)
     ("s" "Save plain text" elogcat-save-buffer)
     ("q" "Quit Logcat" elogcat-exit)]])
 
@@ -1063,9 +1139,10 @@ Only lines at or above this level will be displayed."
           ("l" . elogcat-set-level)
           ("N" . elogcat-use-saved-filter)
           ("C-c C-s" . elogcat-save-current-filter)
-          ("n" . next-line)
+          ("n" . elogcat-next-line)
           ("o" . occur)
-          ("p" . previous-line)
+          ("p" . elogcat-previous-line)
+          ("C-c M-w" . elogcat-copy-message-text)
           ("M-n" . elogcat-next-occurrence)
           ("M-p" . elogcat-previous-occurrence)
           ("q" . elogcat-exit)

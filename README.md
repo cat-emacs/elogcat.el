@@ -85,6 +85,19 @@ file permissions. `C-c C-o` (`elogcat-open-session`) reopens it as an offline
 Logcat buffer without connecting to adb. The existing `s` command remains a
 plain-text snapshot and stops the live stream.
 
+`n` / `p` move down/up one logical log line and place the cursor at the start of
+its message text, after any displayed metadata. Stack-frame indentation is
+preserved. This works with every display preset and does not stop on soft-wrapped
+screen lines.
+
+`C-c M-w` (`elogcat-copy-message-text`) matches Android Studio's **Copy Message
+Text** action: without a region, copy the complete message at point; with an
+active region, copy complete messages intersecting it. Only message text is
+copied, without timestamps, PID/TID, package/process names, levels, or tags.
+Multi-line message groups include folded stack frames and are copied only once.
+The result ends with a newline and is placed in the kill ring and, when enabled
+in Emacs, the system clipboard. Ordinary region copying remains unchanged.
+
 ## ScreenShot
 
 - **elogcat**
@@ -128,7 +141,7 @@ Key | Function
 <kbd>TAB</kbd> / <kbd>S-TAB</kbd> | Fold one exception / toggle all exception folds
 <kbd>f</kbd> | Toggle follow-tail (`LIVE`/`HOLD`)
 <kbd>w</kbd> | Toggle soft wrapping
-<kbd>n</kbd> / <kbd>p</kbd> | Move down/up one line
+<kbd>n</kbd> / <kbd>p</kbd> | Move down/up one log line to the message start
 <kbd>M-n</kbd> / <kbd>M-p</kbd> | Next/previous Error, Fatal, Assert, or stack frame
 <kbd>c</kbd> | Clear the device log and local backlog
 <kbd>D</kbd> | Rediscover and switch Android devices
@@ -138,6 +151,7 @@ Key | Function
 <kbd>N</kbd> | Apply a named saved query
 <kbd>C-c C-s</kbd> | Save the current query by name
 <kbd>C-c C-w</kbd> / <kbd>C-c C-o</kbd> | Save/reopen a structured offline session
+<kbd>C-c M-w</kbd> | Copy message text at point or in the active region (no metadata)
 <kbd>o</kbd> | Run `occur`
 <kbd>s</kbd> | Save the buffer and stop Logcat
 <kbd>g</kbd> | Show detailed stream and filter status
