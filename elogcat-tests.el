@@ -67,7 +67,7 @@
      (unwind-protect
          (with-current-buffer (get-buffer-create elogcat-buffer)
            (elogcat-mode)
-           (cl-letf (((symbol-function 'android-adb-executable)
+           (cl-letf (((symbol-function 'adb-executable)
                       (lambda () "/test/adb")))
              ,@body))
        (when-let* ((buffer (get-buffer elogcat-buffer)))

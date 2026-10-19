@@ -3,9 +3,9 @@ BATCH = $(EMACS) -Q --batch
 SOURCES = elogcat-core.el elogcat-filter.el elogcat-process.el elogcat.el
 TEST_DEPS_DIR ?= .test-deps
 PACKAGE_DIR = $(abspath $(TEST_DEPS_DIR)/elpa)
-ANDROID_ADB_DIR ?= $(abspath $(TEST_DEPS_DIR)/android-adb)
+ADB_DIR ?= $(abspath $(TEST_DEPS_DIR)/adb)
 ANDROID_PROJECT_DIR ?= $(abspath $(TEST_DEPS_DIR)/android-project)
-LOAD_PATH = -L . -L "$(ANDROID_ADB_DIR)" -L "$(ANDROID_PROJECT_DIR)"
+LOAD_PATH = -L . -L "$(ADB_DIR)" -L "$(ANDROID_PROJECT_DIR)"
 
 ARCHIVES = --eval "(setq package-user-dir \"$(PACKAGE_DIR)\")" \
 	--eval "(require 'package)" \
@@ -18,7 +18,7 @@ all: clean compile
 
 install-deps:
 	mkdir -p "$(PACKAGE_DIR)"
-	test -d "$(ANDROID_ADB_DIR)/.git" || git clone --depth 1 https://github.com/cat-emacs/android-adb "$(ANDROID_ADB_DIR)"
+	test -d "$(ADB_DIR)/.git" || git clone --depth 1 https://github.com/cat-emacs/adb "$(ADB_DIR)"
 	test -d "$(ANDROID_PROJECT_DIR)/.git" || git clone --depth 1 https://github.com/cat-emacs/android-project "$(ANDROID_PROJECT_DIR)"
 	$(BATCH) $(ARCHIVES) \
 		--eval "(package-refresh-contents)" \

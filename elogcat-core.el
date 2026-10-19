@@ -8,7 +8,7 @@
 
 ;;; Code:
 (require 'cl-lib)
-(require 'android-adb)
+(require 'adb)
 (require 'subr-x)
 
 (defgroup elogcat nil
@@ -76,7 +76,7 @@
 
 (defun elogcat--adb-command (&rest arguments)
   "Return an adb command for current device with ARGUMENTS."
-  (apply #'android-adb-command elogcat-device-serial arguments))
+  (apply #'adb-command elogcat-device-serial arguments))
 
 (defun elogcat--new-message-group (message)
   "Return a new message group initialized with MESSAGE."

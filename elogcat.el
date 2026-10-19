@@ -6,7 +6,7 @@
 ;; Maintainer: Misaka <chuxubank@qq.com>
 ;; Version: 1.0.0
 ;; Keywords: tools
-;; Package-Requires: ((emacs "28.1") (s "1.9.0") (dash "2.10.0") (transient "0.3.0") (android-adb "0.1.0"))
+;; Package-Requires: ((emacs "28.1") (s "1.9.0") (dash "2.10.0") (transient "0.3.0") (adb "0.1.0"))
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -633,7 +633,7 @@ Only lines at or above this level will be displayed."
             (cons (plist-get device :serial)
                   (or (plist-get device :model) (plist-get device :serial))))
           (seq-filter (lambda (device) (eq (plist-get device :state) 'device))
-                      (android-adb-parse-devices output))))
+                      (adb-parse-devices output))))
 
 (defun elogcat--choose-device (devices)
   "Return a device serial selected from DEVICES."
@@ -684,7 +684,7 @@ Only lines at or above this level will be displayed."
   (let ((output-buffer (generate-new-buffer " *elogcat-devices*")))
     (setq elogcat--device-query-process
           (make-process :name "elogcat-devices" :buffer output-buffer
-                        :command (android-adb-command nil "devices" "-l")
+                        :command (adb-command nil "devices" "-l")
                         :connection-type 'pipe :noquery t
                         :sentinel #'elogcat--devices-sentinel))
     (process-put elogcat--device-query-process

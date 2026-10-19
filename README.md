@@ -1,6 +1,6 @@
 # elogcat.el [![MELPA](http://melpa.org/packages/elogcat-badge.svg)](http://melpa.org/#/elogcat)
 
-logcat interface for Emacs using [android-adb](https://github.com/cat-emacs/android-adb), with optional [android-project](https://github.com/cat-emacs/android-project) project integration.
+logcat interface for Emacs using [adb](https://github.com/cat-emacs/adb), with optional [android-project](https://github.com/cat-emacs/android-project) project integration.
 
 `elogcat-mode` is a read-only major mode derived from `special-mode`. It keeps a
 bounded, structured backlog of `adb logcat -v threadtime` records. Filters and
@@ -105,13 +105,13 @@ in Emacs, the system clipboard. Ordinary region copying remains unchanged.
 
 ## Installation
 
-This Cat fork uses android-adb. Install the VC repositories explicitly;
+This Cat fork uses adb. Install the VC repositories explicitly;
 android-project is optional and enables automatic project application-ID filtering.
 
 Requirements
 
 - **Emacs 28.1 or newer**
-- **adb and android-adb 0.1.0**
+- **adb and adb 0.1.0**
 - **Transient 0.3.0 or newer** (built into current Emacs releases)
 
 [Installing the Android SDK](https://developer.android.com/sdk/installing/)
@@ -119,8 +119,8 @@ Requirements
 You can add these lines to your init file.
 
 ```elisp
-(use-package android-adb
-  :vc (:url "https://github.com/cat-emacs/android-adb"))
+(use-package adb
+  :vc (:url "https://github.com/cat-emacs/adb"))
 ;; Optional project integration, without android-mode:
 (use-package android-project
   :vc (:url "https://github.com/cat-emacs/android-project"))
